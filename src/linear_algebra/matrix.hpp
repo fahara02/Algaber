@@ -418,14 +418,42 @@ class Matrix {
   // Move constructor
   Matrix(Matrix&& other) noexcept = default;
 
-  // Copy assignment
+  // // Copy assignment
+  // Matrix& operator=(const Matrix& other) {
+  //   if (this != &other) {
+  //     storage_ = other.storage_->clone();
+  //     view_row_start_ = other.view_row_start_;
+  //     view_col_start_ = other.view_col_start_;
+  //     view_rows_ = other.view_rows_;
+  //     view_cols_ = other.view_cols_;
+  //   }
+  //   return *this;
+  // }
+
+  Matrix clone() const {
+    // Create new matrix with independent storage
+    Matrix copy(view_rows_, view_cols_);
+
+    // Deep copy elements from current view to new matrix
+    for (size_t i = 0; i < view_rows_; ++i) {
+      for (size_t j = 0; j < view_cols_; ++j) {
+        copy(i, j) = operator()(i, j);  // Copy element values
+      }
+    }
+
+    return copy;
+  }
   Matrix& operator=(const Matrix& other) {
     if (this != &other) {
-      storage_ = other.storage_->clone();
-      view_row_start_ = other.view_row_start_;
-      view_col_start_ = other.view_col_start_;
-      view_rows_ = other.view_rows_;
-      view_cols_ = other.view_cols_;
+      if (view_rows_ != other.view_rows_ || view_cols_ != other.view_cols_)
+        throw std::invalid_argument(
+            "Matrix dimensions mismatch for assignment");
+
+      for (size_t i = 0; i < view_rows_; ++i) {
+        for (size_t j = 0; j < view_cols_; ++j) {
+          operator()(i, j) = other(i, j);
+        }
+      }
     }
     return *this;
   }
@@ -1576,24 +1604,20 @@ class Matrix {
       if (insert_dim != 1) {
         throw std::invalid_argument("Too many rows provided");
       }
-      if (other_dim != view_cols_) {
+      if (other_dim != view_cols_)
         throw std::invalid_argument(
             "Incorrect number of columns for row insertion");
-      }
-      if (index > view_rows_) {
+      if (index > view_rows_)
         throw std::out_of_range("Row index out of bounds");
-      }
     } else if (orientation == Orientation::Column) {
       if (insert_dim != 1) {
         throw std::invalid_argument("Too many columns provided");
       }
-      if (other_dim != view_rows_) {
+      if (other_dim != view_rows_)
         throw std::invalid_argument(
             "Incorrect number of rows for column insertion");
-      }
-      if (index > view_cols_) {
+      if (index > view_cols_)
         throw std::out_of_range("Column index out of bounds");
-      }
     }
   }
   // Getter function
@@ -2421,8 +2445,10 @@ class Matrix {
       // 180 degrees - flip both dimensions
       Matrix result(view_rows_, view_cols_);
       for (size_t i = 0; i < view_rows_; ++i) {
+        const size_t src_i = view_rows_ - 1 - i;
         for (size_t j = 0; j < view_cols_; ++j) {
-          result(i, j) = operator()(view_rows_ - 1 - i, view_cols_ - 1 - j);
+          const size_t src_j = view_cols_ - 1 - j;
+          result(i, j) = operator()(src_i, src_j);
         }
       }
       return result;
@@ -3016,9 +3042,8 @@ class Matrix {
 
   // Partial pivoting LU decomposition (row pivoting only)
   Decomposition_LU to_LU_partial_pivoted() const {
-    if (!is_square()) {
+    if (!is_square())
       throw std::invalid_argument("LU decomposition requires square matrix");
-    }
 
     const size_t n = view_rows_;
     Decomposition_LU lu(n);
@@ -3075,9 +3100,8 @@ class Matrix {
 
   // Full pivoting LU decomposition (row and column pivoting)
   Decomposition_LU to_LU_full_pivoted() const {
-    if (!is_square()) {
+    if (!is_square())
       throw std::invalid_argument("LU decomposition requires square matrix");
-    }
 
     const size_t n = view_rows_;
     Decomposition_LU lu(n);
@@ -3636,65 +3660,54 @@ class Matrix {
 
     return X;
   }
-
   Matrix block_jacobi(const Matrix& b, size_t block_size, double tolerance,
                       int max_iterations) {
     if (!is_square())
-      throw std::invalid_argument("Inverse requires square matrix");
-    Matrix A = *this;
-    size_t n = A.rows();
-
-    // Initialize solution vector
+      throw std::invalid_argument("Matrix must be square");
+    const size_t n = rows();
     Matrix x = Matrix::zeros(n, 1);  // Initial guess
-    Matrix x_new(size_t(n), size_t(1));
+    Matrix x_new = Matrix::zeros(n, 1);  // Initialize x_new with zeros
 
-    // Precompute LU decompositions for diagonal blocks
-    std::vector<typename Matrix::Decomposition_LU> block_LUs;
-    for (size_t i = 0; i < n; i += block_size) {
-      const size_t bs = std::min(block_size, n - i);
-      auto D_block = A.view(i, i, bs, bs);
-      block_LUs.push_back(D_block.to_LU(PivotingStrategy::FULL));
-    }
-
-    // Iteration loop
     for (int iter = 0; iter < max_iterations; ++iter) {
-      // Compute residual: r = b - A*x
-      Matrix r = b - A * x;
+      Matrix r = b - (*this) * x;  // Residual using previous x
 
-// Process each block in parallel
 #pragma omp parallel for
       for (size_t i = 0; i < n; i += block_size) {
-        const size_t bs = std::min(block_size, n - i);
-        const size_t block_idx = i / block_size;
-        const auto& lu = block_LUs[block_idx];
-
-        // Get residual block
-        auto r_block = r.view(i, 0, bs, 1);
-
-        // Apply row permutation P to residual
-        Matrix Pb(size_t(bs), size_t(1));
-        for (size_t k = 0; k < bs; ++k)
-          Pb(k, 0) = r_block(lu.P[k], 0);
-
-        // Solve lower triangular system L*y = Pb (unit diagonal)
-        Matrix y = lu.L.solve_triangular(Pb, true, true);
-
-        // Solve upper triangular system U*z = y
-        Matrix z = lu.U.solve_triangular(y, false, false);
-
-        // Apply column permutation Q and update solution
-        Matrix delta(size_t(bs), size_t(1));
-        for (size_t k = 0; k < bs; ++k)
-          delta(lu.Q[k], 0) = z(k, 0);
-
-        x_new.view(i, 0, bs, 1) = x.view(i, 0, bs, 1) + delta;
+        size_t bs = std::min(block_size, n - i);
+        // Extract residual block
+        Matrix r_block = r.view(i, 0, bs, 1);
+        Matrix z = Matrix::zeros(bs, 1);
+        try {
+          // Compute LU for this block
+          auto D_block = view(i, i, bs, bs).clone();
+          auto lu = D_block.to_LU(PivotingStrategy::PARTIAL);
+          // Apply permutation P to residual
+          Matrix Pb = Matrix::zeros(bs, 1);
+          for (size_t k = 0; k < bs; ++k)
+            Pb(k, 0) = r_block(lu.P[k], 0);
+          // Solve Ly = Pb, Uz = y
+          Matrix y = lu.L.solve_triangular(Pb, true, true);
+          z = lu.U.solve_triangular(y, false, false);
+        } catch (...) {
+          // Singular or ill-conditioned block: use diagonal-only Jacobi
+          z = Matrix::zeros(bs, 1);
+          for (size_t k = 0; k < bs; ++k)
+            z(k, 0) = r_block(k, 0) / operator()(i + k, i + k);
+        }
+        // Update the solution block
+        x_new.set_block(i, 0, x.view(i, 0, bs, 1) + z);
       }
 
-      // Check convergence
-      if ((x_new - x).norm() < tolerance)
-        break;
-      x = x_new;
+      // Check convergence using residual norm
+      double residual_norm = (b - (*this) * x_new).norm();
+      if (tolerance >= std::numeric_limits<T>::epsilon()
+          && residual_norm < tolerance) {
+        x = x_new;
+        return x;
+      }
+      x = x_new;  // Update solution for next iteration
     }
+    // Max iterations reached: return last iterate (x)
     return x;
   }
 
