@@ -1,0 +1,84 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(size_t  b)
+    # Input: A (n x n matrix) self , b (block size)
+    # Output: A overwritten with upper Hessenberg form
+    n = size(A, 1)
+    for k = 1 to n-2 step b
+        kb = min(b, n - k - 1)  # Adjust block size for last panel
+        # Compute panel factorization using GQvdG unblocked algorithm
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(A(k:n, k:k+kb-1))
+        # Update trailing matrix using level-3 BLAS operations
+        # Q = I - U_panel * T_panel^{-1} * U_panel^T
+        # A(k:n, k+kb:n) := Q * A(k:n, k+kb:n) * Q^T
+        # Implemented efficiently as:
+        V = U_panel^T * A(k:n, k+kb:n)         # Matrix multiplication
+        W = T_panel^{-1} * (U_panel^T * A)          # Triangular solve
+        A = A - U_panel * W                   # Left update
+        X = A(1:n, k:n) * U_panel              # Matrix multiplication
+        Y = X * T_panel^{-T}                   # Triangular solve
+        A(1:n, k:n) = A(1:n, k:n) - Y * U_panel^T  # Right update
+    end for
+end function
+
+void function  = HESSRED_GQVDG_UNB(A(k:n, k:k+kb-1),U_panel, Z_panel, T_panel)
+    # Input: A_panel = A(k:n, k:k+kb-1), a submatrix panel of size (n-k+1) x kb
+    # Output: U_panel, Z_panel, T_panel for the panel
+    A_panel = A(k:n, k:k+kb-1)  # Define the panel explicitly
+    m = n - k + 1  # Number of rows in the panel
+    nb = kb       # Number of columns in the panel (panel width)
+    
+    # Initialize output matrices
+    U_panel = zeros(m, nb)  # Householder vectors
+    Z_panel = zeros(m, nb)  # Intermediate results for trailing updates
+    T_panel = zeros(nb, nb) # Triangular factor for accumulated transformations
+    
+    # Loop over each column in the panel
+    for j = 1 to nb
+        # Extract the current column from row j to the bottom
+        a_j = A_panel(j:m, j)
+        
+        # Apply previous Householder transformations to the current column
+        if j > 1
+            # Update a_j using accumulated transformations from previous steps
+            # This could be implemented as:
+            # a_j = a_j - U_panel(j:m, 1:j-1) * (T_panel(1:j-1, 1:j-1)^{-1} * (U_panel(j:m, 1:j-1)^T * a_j))
+            # For simplicity, assume a helper function
+            a_j = apply_previous_transforms(a_j, U_panel, T_panel, j)
+        end
+        
+        # Compute the Householder vector to zero out below the subdiagonal
+        [u_j, tau_j, a_j_updated] = HOUSEV(a_j)
+        
+        # Store the Householder vector and scalar
+        U_panel(j:m, j) = u_j
+        T_panel(j, j) = tau_j
+        
+        # Update Z_panel for the remaining columns in the panel
+        if j < nb
+            Z_panel(j:m, j) = A_panel(j:m, j+1:nb) * u_j
+        end
+        
+        # Update off-diagonal elements of T_panel
+        if j < nb
+            for i = j+1 to nb
+                T_panel(j, i) = U_panel(j:m, i)^T * u_j
+            end
+        end
+        
+        # Update the current column in A_panel
+        A_panel(j:m, j) = a_j_updated
+    end for
+    
+    # Return the computed matrices
+    return U_panel, Z_panel, T_panel
+end function
+
+def Housev(x):
+    sigma = norm(x[1:])^2
+    if sigma == 0:
+        return (x, 0)
+    mu = sqrt(x[0]^2 + sigma)
+    beta = x[0] + mu if x[0] <= 0 else -sigma / (x[0] + mu)
+    tau = 2 * beta / (sigma + beta^2)
+    u = x / beta
+    u[0] = 1
+    return (u, tau)
