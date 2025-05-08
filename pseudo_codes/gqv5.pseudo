@@ -1,0 +1,81 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(size_t b)
+    Matrix<T> A = *this
+    n = size(A, 1)  # Number of rows (assuming square matrix)
+    for k = 1 to n - 1 step b
+        kb = min(b, n - k)  # Panel width, adjusted for the end
+        # Compute panel factorization
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(k, kb)
+        if k + kb < n  # If there’s a trailing matrix to update
+            # Left update: A[k:n, k+kb:n] = (I - U T⁻¹ Uᵀ)ᵀ * A[k:n, k+kb:n]
+            V = U_panelᵀ * A[k:n, k+kb:n]
+            W = solve(T_panelᵀ, V)  # Solve T_panelᵀ W = V
+            A[k:n, k+kb:n] -= U_panel * W
+            # Right update: A[1:n, k+kb:n] = A[1:n, k+kb:n] * (I - U T⁻¹ Uᵀ)
+            Y = A[1:n, k+kb:n] * U_panel
+            Temp = solve(T_panel, Y)  # Solve T_panel Temp = Y
+            A[1:n, k+kb:n] -= Temp * U_panelᵀ
+        end
+    end
+    return A
+end
+function HessenbergPanel HESSRED_GQVDG_UNB(size_t k, size_t kb)
+    Matrix<T> A = *this
+    n = size(A, 1)
+    U_panel = zeros(n - k + 1, kb)  # Householder vectors
+    T_panel = zeros(kb, kb)         # Triangular factor
+    Z_panel = zeros(n, kb)          # Intermediate matrix for updates
+    for j = 1 to kb
+        # Extract subvector starting at subdiagonal
+        a_j_sub = A[k + j: n, k + j - 1]
+        if j > 1
+            # Update a_j_sub with previous transformations
+            U_prev = U_panel[j: n - k + 1, 1: j - 1]
+            T_prev = T_panel[1: j - 1, 1: j - 1]
+            y = U_prevᵀ * a_j_sub
+            z = solve(T_prev, y)  # Solve T_prev z = y
+            a_j_sub -= U_prev * z
+        end
+        # Compute Householder vector and scalar
+        [u, tau] = Housev(a_j_sub)
+        # Store Householder vector in U_panel
+        U_panel[j: n - k + 1, j] = u
+        T_panel[j, j] = tau
+        if j < kb
+            # Apply Householder transformation to trailing submatrix
+            H = I - tau * u * uᵀ
+            A[k + j: n, k + j: n] = H * A[k + j: n, k + j: n]
+            # Compute Z_panel column
+            Z_panel[:, j] = A[:, k + j - 1: n] * U_panel[j: n - k + 1, j]
+            # Compute off-diagonal T_panel elements
+            for i = j + 1 to kb
+                T_panel[j, i] = U_panel[i: n - k + 1, i]ᵀ * U_panel[j: n - k + 1, j]
+            end
+        end
+        # Update A with transformed column
+        A[k + j - 1, k + j - 1] = a_j_sub[1]          # Diagonal
+        A[k + j, k + j - 1] = -tau * norm(a_j_sub[2:]) # Subdiagonal
+        A[k + j + 1: n, k + j - 1] = 0                # Zeros below
+    end
+    return U_panel, Z_panel, T_panel
+end
+
+function [Vector<T> u, T tau] Housev(Vector<T> x)
+    sigma = norm(x[2:])²
+    u = x
+    if sigma == 0
+        tau = 0
+        u[1] = 1
+        u[2:] = 0
+    else
+        mu = sqrt(x[1]² + sigma)
+        if x[1] <= 0
+            beta = x[1] - mu
+        else
+            beta = -sigma / (x[1] + mu)
+        end
+        tau = 2 * beta² / (sigma + beta²)
+        u = x / beta
+        u[1] = 1
+    end
+    return (u, tau)
+end

@@ -1,0 +1,71 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(size_t b)
+    Matrix<T> A = *this
+    n = size(A, 1)
+    for k = 1 to n-1 step b
+        kb = min(b, n - k)
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(k, kb)
+
+        if k + kb < n
+            # Left update: A(k:n, k+kb:n) = (I - U T⁻¹ Uᵀ)ᵀ * A(k:n, k+kb:n)
+            V = U_panelᵀ * A[k:n, k+kb:n]
+            W = solve(T_panelᵀ, V)      # Solve Tᵗ W = V
+            A[k:n, k+kb:n] -= U_panel * W
+
+            # Right update: A(1:n, k+kb:n) = A(1:n, k+kb:n) * (I - U T⁻¹ Uᵀ)
+            Y = A[1:n, k+kb:n] * U_panel
+            W = solve((T_panel) , Yᵗ)ᵗ      # Transpose to solve, then transpose back
+            A[1:n, k+kb:n] -= W * U_panelᵀ
+        end
+    end
+    return A
+end
+function HessenbergPanel HESSRED_GQVDG_UNB(size_t k, size_t kb)
+    Matrix<T> A = *this
+    n = size(A, 1)
+    m = n - k + 1
+    U_panel = zeros(m, kb)
+    T_panel = zeros(kb, kb)
+    Z_panel = zeros(n, kb)
+
+    for j = 1 to kb
+        a_j = A[k+j-1:n, k+j-1]
+        if j > 1
+            U_prev = U_panel[1:m, 1:j-1]
+            T_prev = T_panel[1:j-1, 1:j-1]
+            y = U_prevᵀ * a_j
+            z = solve(T_prev, y)
+            a_j -= U_prev * z
+        end
+        [u, tau] = Housev(a_j)
+        U_panel[j:m, j] = [1; u]
+        T_panel[j, j] = tau
+        if j < kb
+            Z_panel[1:n, j] = A[1:n, k+j-1:n] * U_panel[1:m, j]
+            for i = j+1 to kb
+                T_panel[j, i] = U_panel[1:m, i]ᵀ * U_panel[1:m, j]
+            end
+            A[k+j-1:n, k+j:k+kb-1] -= tau * (u * (uᵀ * A[k+j-1:n, k+j:k+kb-1]))
+        end
+        A[k+j-1:n, k+j-1] = [a_j[1]; -tau * norm(a_j[2:]); zeros(n - (k + j))]
+    end
+    return U_panel, Z_panel, T_panel
+end
+function [Vector<T> u, T tau] Housev(Vector<T> x)
+    sigma = norm(x[2:])²
+    u = x
+    if sigma == 0
+        tau = 0
+        u[1] = 1
+        u[2:] = 0
+        return (u, tau)
+    mu = sqrt(x[1]² + sigma)
+    if x[1] <= 0
+        beta = x[1] - mu
+    else
+        beta = -sigma / (x[1] + mu)
+    tau = 2 * beta² / (sigma + beta²)
+    u = x / beta
+    u[1] = 1
+    return (u, tau)
+end
+

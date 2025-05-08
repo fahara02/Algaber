@@ -1,0 +1,101 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(size_t b)
+    Matrix<T> A = *this
+    n = size(A, 1)
+
+    for k = 0 to n-2 step b  // 0-based indexing as in the paper
+        kb = min(b, n - k - 1)  // Block size (adjust for 0-based)
+
+        // --- Panel Factorization (Algorithm in Fig.4/5) ---
+        // Reduce A[k:n, k:k+kb] to upper Hessenberg form
+        // Returns U_panel (Householder vectors), Z_panel, T_panel
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(A, k, kb)
+
+        // --- Trailing Submatrix Update ---
+        if k + kb + 1 < n  // Check if trailing matrix exists
+            // Right Update: A[0:k, k+kb+1:n] = A[0:k, k+kb+1:n] * Q
+            // Q = I - U_panel * T_panel⁻¹ * U_panelᵀ
+            if k > 0
+                ATR = A[0:k, k+kb+1:n]
+                Y = ATR * U_panel  // Y = ATR * U
+                W = Y * inv(T_panel)  // W = Y * T⁻¹
+                ATR = ATR - W * U_panelᵀ  // ATR = ATR * Q
+                A[0:k, k+kb+1:n] = ATR
+            end
+
+            // Left Update: A[k:n, k+kb+1:n] = Qᵀ * (A[k:n, k+kb+1:n] - Z_panel * T⁻¹ * U_panelᵀ)
+            Atrail = A[k:n, k+kb+1:n]
+            X = inv(T_panel) * U_panelᵀ  // X = T⁻¹ * Uᵀ
+            Atrail = Atrail - Z_panel * X  // Atrail = Atrail - Z * X
+            // Apply Qᵀ = I - U_panel * inv(T)ᵀ * U_panelᵀ
+            W = U_panelᵀ * Atrail  // W = Uᵀ * Atrail
+            Atrail = Atrail - U_panel * (inv(T_panelᵀ) * W)
+            A[k:n, k+kb+1:n] = Atrail
+        end
+    end
+    return A
+end
+
+// Unblocked GQvdG panel factorization (Fig.4 in paper)
+function [Matrix<T> U, Matrix<T> Z, Matrix<T> T] HESSRED_GQVDG_UNB(Matrix<T> A, size_t k, size_t b)
+    n = size(A, 1)
+    m = n - k  // Rows in panel
+    U = Matrix<T>(m, b)  // Householder vectors
+    Z = Matrix<T>(m, b)  // Z = A * U
+    T = Matrix<T>(b, b)  // Upper triangular accumulator
+
+    for j = 0 to b-1  // 0-based
+        col = k + j  // Current column in global A
+
+        // --- Update current column with prior transformations ---
+        if j > 0
+            // Apply previous Householders to column col
+            U_prev = U[0:m, 0:j]
+            y = U_prevᵀ * A[k:n, col]
+            z = solve(T[0:j, 0:j], y)  // Solve T(0:j,0:j) * z = y
+            A[k:n, col] -= U_prev * z
+        end
+
+        // --- Compute Householder vector for current column ---
+        x = A[k+j+1:n, col]  // Subdiagonal part
+        [u, tau] = Housev(x)  // u starts from k+j+1
+        U[j+1:m-1, j] = u  // Store u in U (offset by j+1)
+        U[j, j] = 1.0  // First element of Householder vector
+        T[j, j] = tau
+
+        // --- Compute Z column j: Z[:,j] = A * U[:,j] ---
+        Z[0:m, j] = A[k:n, k:n] * U[0:m, j]
+
+        // --- Update T matrix (fill upper triangle) ---
+        if j < b-1
+            for i = j+1 to b-1
+                T[j, i] = dot(U[0:m, j], U[0:m, i])
+            end
+        end
+
+        // --- Apply Householder to trailing submatrix ---
+        // A[k+j+1:n, col+1:n] -= tau * u * (uᵀ * A[k+j+1:n, col+1:n])
+        w = tau * (uᵀ * A[k+j+1:n, col+1:n])
+        A[k+j+1:n, col+1:n] -= u * w
+    end
+    return U, Z, T
+end
+
+// Householder vector computation (Eq.1-3 in Section 2.2)
+function [Vector<T> u, T tau] Housev(Vector<T> x)
+    σ = norm(x[1:end])  // x[0] is the first element
+    if σ == 0
+        tau = 0
+        u = [1; zeros(length(x)-1)]
+        return (u, tau)
+    end
+    μ = sqrt(x[0]^2 + σ^2)
+    if x[0] ≤ 0
+        α = x[0] - μ
+    else
+        α = -σ / (x[0] + μ)
+    end
+    u = x / α
+    u[0] = 1
+    tau = (α^2) / (σ^2 + α^2)  // From τ = 1/(uᵀu/2)
+    return (u, tau)
+end

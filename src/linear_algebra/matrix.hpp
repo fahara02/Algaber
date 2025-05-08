@@ -194,6 +194,10 @@ class Matrix {
     Matrix D;
     Matrix U;
   };
+  struct Decomposition_QR {
+    Matrix Q;
+    Matrix R;
+  };
   struct Decomposition_Cholesky {
     Matrix L;  // Lower triangular matrix
   };
@@ -520,6 +524,18 @@ class Matrix {
            storage_->end();
   }
 
+  bool is_zero() const {
+    const T epsilon = std::numeric_limits<T>::epsilon() * 100;
+    for (size_t i = 0; i < rows(); i++) {
+      for (size_t j = 0; j < cols(); j++) {
+        if (std::abs(operator()(i, j)) > epsilon) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   // ===== Element Access =====
 
   T& operator()(size_t row, size_t col) {
@@ -562,7 +578,9 @@ class Matrix {
   Matrix get_row(size_t row) const { return view(row, 0, 1, view_cols_); }
 
   // Get entire column as new matrix
-  Matrix get_column(size_t col) const { return view(0, col, view_rows_, 1); }
+  Matrix get_column(size_t col) const {
+    return view(0, col, view_rows_, 1);
+  }
 
   // ===== Block Manipulation Utilities =====
   Matrix get_block(size_t row_start, size_t col_start, size_t rows,
@@ -822,6 +840,63 @@ class Matrix {
 
     return Matrix(storage_, view_row_start_ + row_start,
                   view_col_start_ + col_start, rows, cols);
+  }
+
+  Matrix minor_matrix(const size_t row, const size_t column) const {
+    if (row >= view_rows_ || column >= view_cols_) {
+      throw std::invalid_argument("Row or column index out of bounds");
+    }
+
+    Matrix result(view_rows_ - 1, view_cols_ - 1);
+
+    for (size_t i = 0, r = 0; i < view_rows_; ++i) {
+      if (i == row)
+        continue;
+
+      for (size_t j = 0, c = 0; j < view_cols_; ++j) {
+        if (j == column)
+          continue;
+
+        result(r, c) = operator()(i, j);
+        ++c;
+      }
+      ++r;
+    }
+
+    return result;
+  }
+  //return a copy of the sected submatrix of existing  matrix
+  Matrix sub_matrix(size_t row_start, size_t col_start, size_t rows,
+                    size_t cols) const {
+    if (row_start + rows > view_rows_ || col_start + cols > view_cols_)
+      throw std::invalid_argument("Submatrix dimensions exceed matrix bounds");
+
+    Matrix result(rows, cols);
+    for (size_t i = 0; i < rows; ++i) {
+      for (size_t j = 0; j < cols; ++j) {
+        result(i, j) = operator()(row_start + i, col_start + j);
+      }
+    }
+    return result;
+  }
+  //identical to set_block just method name change,which insert a submatrix to existing matrix
+  void set_submatrix(size_t start_row, size_t start_col, const Matrix& sub) {
+    if (start_row + sub.rows() > rows() || start_col + sub.cols() > cols()) {
+      throw std::invalid_argument("Submatrix exceeds matrix dimensions");
+    }
+    auto target = view(start_row, start_col, sub.rows(), sub.cols());
+    target = sub;  // Utilizes the assignment operator to copy elements
+  }
+
+  template <typename InputIterator, typename OutputIterator>
+  void insert_submatrix(InputIterator srcBegin, InputIterator srcEnd,
+                        OutputIterator destPos, size_t numRows, size_t numCols,
+                        size_t position, size_t offset) {
+    // Copy the values from source to destination with the appropriate offset
+    for (size_t i = 0; i < numRows; ++i) {
+      std::copy(srcBegin + i * numCols, srcBegin + (i + 1) * numCols,
+                destPos + (position + i) * offset);
+    }
   }
 
   // Create a view of a single row
@@ -1383,13 +1458,48 @@ class Matrix {
   }
 
   // In-place subtraction
+  // Matrix& operator-=(const Matrix& rhs) {
+  //   if (view_rows_ != rhs.view_rows_ || view_cols_ != rhs.view_cols_)
+  //     throw std::invalid_argument("Matrix dimensions mismatch");
+
+  //   for (size_t i = 0; i < view_rows_; ++i)
+  //     for (size_t j = 0; j < view_cols_; ++j)
+  //       operator()(i, j) -= rhs(i, j);
+
+  //   return *this;
+  // }
   Matrix& operator-=(const Matrix& rhs) {
     if (view_rows_ != rhs.view_rows_ || view_cols_ != rhs.view_cols_)
-      throw std::invalid_argument("Matrix dimensions mismatch");
+      throw std::invalid_argument("Matrix dimensions mismatch for -=");
 
-    for (size_t i = 0; i < view_rows_; ++i)
-      for (size_t j = 0; j < view_cols_; ++j)
-        operator()(i, j) -= rhs(i, j);
+    const size_t block_size = BLOCK_SIZE;
+
+    if constexpr (ALGABER_OPENMP_ENABLED) {
+#pragma omp parallel for num_threads(ThreadCount) collapse(2)
+      for (size_t i_outer = 0; i_outer < view_rows_; i_outer += block_size) {
+        for (size_t j_outer = 0; j_outer < view_cols_; j_outer += block_size) {
+          size_t i_end = std::min(i_outer + block_size, view_rows_);
+          size_t j_end = std::min(j_outer + block_size, view_cols_);
+          for (size_t i = i_outer; i < i_end; ++i) {
+            for (size_t j = j_outer; j < j_end; ++j) {
+              operator()(i, j) -= rhs(i, j);
+            }
+          }
+        }
+      }
+    } else {
+      for (size_t i_outer = 0; i_outer < view_rows_; i_outer += block_size) {
+        size_t i_end = std::min(i_outer + block_size, view_rows_);
+        for (size_t j_outer = 0; j_outer < view_cols_; j_outer += block_size) {
+          size_t j_end = std::min(j_outer + block_size, view_cols_);
+          for (size_t i = i_outer; i < i_end; ++i) {
+            for (size_t j = j_outer; j < j_end; ++j) {
+              operator()(i, j) -= rhs(i, j);
+            }
+          }
+        }
+      }
+    }
 
     return *this;
   }
@@ -1410,6 +1520,39 @@ class Matrix {
     for (size_t i = 0; i < view_rows_; ++i)
       for (size_t j = 0; j < view_cols_; ++j)
         operator()(i, j) /= scalar;
+
+    return *this;
+  }
+
+  Matrix& operator-=(const T& scalar) {
+    const size_t block_size = BLOCK_SIZE;
+
+    if constexpr (ALGABER_OPENMP_ENABLED) {
+#pragma omp parallel for num_threads(ThreadCount) collapse(2)
+      for (size_t i_outer = 0; i_outer < view_rows_; i_outer += block_size) {
+        for (size_t j_outer = 0; j_outer < view_cols_; j_outer += block_size) {
+          size_t i_end = std::min(i_outer + block_size, view_rows_);
+          size_t j_end = std::min(j_outer + block_size, view_cols_);
+          for (size_t i = i_outer; i < i_end; ++i) {
+            for (size_t j = j_outer; j < j_end; ++j) {
+              operator()(i, j) -= scalar;
+            }
+          }
+        }
+      }
+    } else {
+      for (size_t i_outer = 0; i_outer < view_rows_; i_outer += block_size) {
+        size_t i_end = std::min(i_outer + block_size, view_rows_);
+        for (size_t j_outer = 0; j_outer < view_cols_; j_outer += block_size) {
+          size_t j_end = std::min(j_outer + block_size, view_cols_);
+          for (size_t i = i_outer; i < i_end; ++i) {
+            for (size_t j = j_outer; j < j_end; ++j) {
+              operator()(i, j) -= scalar;
+            }
+          }
+        }
+      }
+    }
 
     return *this;
   }
@@ -1466,7 +1609,6 @@ class Matrix {
     return *this;
   }
 
-  // Create a new matrix by applying a function to each element
   Matrix map(std::function<T(T)> func) const {
     Matrix result(view_rows_, view_cols_);
     for (size_t i = 0; i < view_rows_; ++i)
@@ -2000,17 +2142,6 @@ class Matrix {
     return *this;
   }
 
-  template <typename InputIterator, typename OutputIterator>
-  void insertSubmatrix(InputIterator srcBegin, InputIterator srcEnd,
-                       OutputIterator destPos, size_t numRows, size_t numCols,
-                       size_t position, size_t offset) {
-    // Copy the values from source to destination with the appropriate offset
-    for (size_t i = 0; i < numRows; ++i) {
-      std::copy(srcBegin + i * numCols, srcBegin + (i + 1) * numCols,
-                destPos + (position + i) * offset);
-    }
-  }
-
   // Reshape matrix (in-place if possible)
   Matrix reshape(size_t new_rows, size_t new_cols) const {
     if (new_rows * new_cols != view_rows_ * view_cols_)
@@ -2075,6 +2206,11 @@ class Matrix {
       result(i, i) = elements[i];
     }
     return result;
+  }
+  static Matrix unit_vector(size_t n, size_t i) {
+    Matrix<T, StoragePolicy> vec(n, 1, T(0));
+    vec(i, 0) = T(1);
+    return vec;
   }
 
   static Matrix linspace(T start, T end, size_t count) {
@@ -3345,30 +3481,6 @@ class Matrix {
     return sum;
   }
 
-  Matrix sub_matrix(const size_t row, const size_t column) const {
-    if (row >= view_rows_ || column >= view_cols_) {
-      throw std::invalid_argument("Row or column index out of bounds");
-    }
-
-    Matrix result(view_rows_ - 1, view_cols_ - 1);
-
-    for (size_t i = 0, r = 0; i < view_rows_; ++i) {
-      if (i == row)
-        continue;
-
-      for (size_t j = 0, c = 0; j < view_cols_; ++j) {
-        if (j == column)
-          continue;
-
-        result(r, c) = operator()(i, j);
-        ++c;
-      }
-      ++r;
-    }
-
-    return result;
-  }
-
   Matrix<long double> inverse() const {
     if (!is_square())
       throw std::invalid_argument("Inverse requires square matrix");
@@ -3394,7 +3506,7 @@ class Matrix {
       for (size_t i = 0; i < n; ++i) {
         for (size_t j = 0; j < n; ++j) {
           // Calculate minor
-          Matrix minor = sub_matrix(i, j);
+          Matrix minor = minor_matrix(i, j);
           T minor_det = minor.det();
 
           // Calculate cofactor (include sign)
@@ -3665,7 +3777,7 @@ class Matrix {
     if (!is_square())
       throw std::invalid_argument("Matrix must be square");
     const size_t n = rows();
-    Matrix x = Matrix::zeros(n, 1);  // Initial guess
+    Matrix x = Matrix::zeros(n, 1);      // Initial guess
     Matrix x_new = Matrix::zeros(n, 1);  // Initialize x_new with zeros
 
     for (int iter = 0; iter < max_iterations; ++iter) {
@@ -3676,7 +3788,7 @@ class Matrix {
         size_t bs = std::min(block_size, n - i);
         // Extract residual block
         Matrix r_block = r.view(i, 0, bs, 1);
-        Matrix z = Matrix::zeros(bs, 1);
+        Matrix z(size_t(bs), size_t(1));
         try {
           // Compute LU for this block
           auto D_block = view(i, i, bs, bs).clone();
@@ -3700,8 +3812,8 @@ class Matrix {
 
       // Check convergence using residual norm
       double residual_norm = (b - (*this) * x_new).norm();
-      if (tolerance >= std::numeric_limits<T>::epsilon()
-          && residual_norm < tolerance) {
+      if (tolerance >= std::numeric_limits<T>::epsilon() &&
+          residual_norm < tolerance) {
         x = x_new;
         return x;
       }
@@ -3945,53 +4057,325 @@ class Matrix {
 
     return balanced;
   }
+  Matrix<T> HessenbergReduceGQvdGBlocked(size_t b) {
+    Matrix<T> A = *this;  // Create a copy to modify
+    size_t n = A.rows();
 
-  /**
-   * @brief Computes the Householder vector and reflection factor for this column vector
-   * 
-   * The Householder transformation can be used to zero out all elements below the first element
-   * in a column vector. This method returns both the Householder vector (u) and the reflection
-   * factor (tau), which can be used to form the Householder matrix H = I - tau*u*u^T.
-   * 
-   * @return A pair containing the Householder vector and the reflection factor tau
-   * @throws std::invalid_argument if the matrix is not a column vector
-   */
-  std::pair<Matrix<T, StoragePolicy>, T> house_v() const {
-    // Ensure this is a column vector
-    if (view_cols_ != 1) {
-      throw std::invalid_argument("house_v requires a column vector");
+    for (size_t k = 0; k < n - 1; k += b) {
+      size_t kb = std::min(b, n - k - 1);  // Actual block size
+
+      // Perform panel factorization
+      auto [U_panel, Z_panel, T_panel] = A.hessenberg_panel(k, kb);
+
+      // Update trailing submatrix
+      size_t trailing_col_start = k + kb + 1;
+      if (trailing_col_start < n) {
+        // Right update: A[0:k, trailing_col_start:n] = A[0:k, trailing_col_start:n] * Q
+        if (k > 0) {
+          Matrix<T> ATR =
+              A.view(0, trailing_col_start, k, n - trailing_col_start);
+          Matrix<T> Y = ATR * U_panel;
+          Matrix<T> T_inv = T_panel.inverse();
+          Matrix<T> W = Y * T_inv;
+          ATR -= W * U_panel.transpose();
+          A.view(0, trailing_col_start, k, n - trailing_col_start) = ATR;
+        }
+
+        // Left update: A[k:n, trailing_col_start:n] = Q^T * A[k:n, trailing_col_start:n]
+        Matrix<T> Atrail =
+            A.view(k, trailing_col_start, n - k, n - trailing_col_start);
+        Matrix<T> T_inv = T_panel.inverse();
+
+        // Compute first application Q^T * Atrail
+        Matrix<T> W = U_panel.transpose() * Atrail;
+        W = T_inv.transpose() * W;
+        Atrail -= U_panel * W;
+
+        A.view(k, trailing_col_start, n - k, n - trailing_col_start) = Atrail;
+      }
     }
 
-    // Extract first element and compute sigma (sum of squares of remaining elements)
+    return A;
+  }
+
+  std::tuple<Matrix<T>, Matrix<T>, Matrix<T>, Matrix<T>> hessenberg_panel(size_t k,
+                                                               size_t b) {
+    size_t n = this->rows();
+    size_t m = n - k;
+    Matrix<T> U_panel(size_t(m), size_t(b));
+    Matrix<T> Z_panel(size_t(m), size_t(b));
+    Matrix<T> T_panel = Matrix::zeros(b, b);
+
+    // // Initialize T_panel to zero
+    // for (size_t i = 0; i < b; ++i) {
+    //   for (size_t j = 0; j < b; ++j) {
+    //     T_panel(i, j) = T(0);
+    //   }
+    // }
+
+    for (size_t j = 0; j < b; ++j) {
+      size_t col = k + j;
+
+      // Apply previous transformations to current column
+      if (j > 0) {
+        Matrix<T> U_prev = U_panel.view(0, 0, m, j);
+        Matrix<T> current_col = this->view(k, col, m, 1);
+        Matrix<T> y = U_prev.transpose() * current_col;
+
+        Matrix<T> T_sub = T_panel.view(0, 0, j, j);
+        Matrix<T> z = T_sub.solve(y);
+
+        current_col -= U_prev * z;
+      }
+
+      // Compute Householder vector
+      Matrix<T> x = this->view(k + j + 1, col, n - (k + j + 1), 1);
+      auto [u, tau] = x.house_v();
+
+      // Store u in U_panel
+      U_panel(j, j) = 1.0;
+      if (u.rows() > 0) {
+        U_panel(j + 1, j) = u;
+      }
+      T_panel(j, j) = tau;
+
+      // Compute Z[:, j] = A * U[:, j]
+      Matrix<T> A_panel = this->view(k, k, m, m);
+      Matrix<T> U_col_j = U_panel.view(0, j, m, 1);
+      Z_panel.view(0, j, m, 1) = A_panel * U_col_j;
+
+      // Update T matrix
+      if (j < b - 1) {
+        for (size_t i = 0; i <= j; ++i) {
+          for (size_t l = j + 1; l < b; ++l) {
+            Matrix<T> U_col_i = U_panel.view(0, i, m, 1);
+            Matrix<T> U_col_l = U_panel.view(0, l, m, 1);
+            T tau_i = T_panel(i, i);
+            T inner_prod = (U_col_i.transpose() * U_col_l)(0, 0);
+            T_panel(i, l) += tau_i * inner_prod;
+          }
+        }
+      }
+
+      // Apply Householder transformation to trailing submatrix
+      Matrix<T> trailing =
+          this->view(k + j + 1, col + 1, n - (k + j + 1), n - (col + 1));
+      Matrix<T> w = (u.transpose() * trailing).scale(tau);
+      trailing -= u * w;
+    }
+
+    return {U_panel, Z_panel, T_panel};
+  }
+
+  // Linear system solver
+  Matrix solve(const Matrix& b) const {
+    if (!is_square())
+      throw std::invalid_argument("Coefficient matrix must be square");
+
+    if (view_rows_ != b.rows())
+      throw std::invalid_argument("Incompatible dimensions for system solving");
+
+    // Use the existing LU decomposition with full pivoting
+    auto lu = to_LU(PivotingStrategy::FULL);
+
+    size_t n = view_rows_;
+    size_t m = b.cols();
+
+    Matrix y(n, m);
+    Matrix z(n, m);
+
+    // Precompute PB = P * b
+    Matrix PB = lu.P.to_matrix() * b;
+
+    // for (size_t i = 0; i < n; ++i) {
+    //   for (size_t j = 0; j < m; ++j) {
+    //     pb(i, j) = b(lu.P[i], j);
+    //   }
+    // }
+
+    // Forward substitution to solve L * y = P * b
+
+    for (size_t j = 0; j < m; ++j) {
+      for (size_t i = 0; i < n; ++i) {
+        T sum = PB(i, j);
+        for (size_t k = 0; k < i; ++k) {
+          sum -= lu.L(i, k) * y(k, j);
+        }
+        y(i, j) = sum / lu.L(i, i);
+      }
+    }
+
+    // Backward substitution: Solve U * z = y
+    for (size_t j = 0; j < m; ++j) {
+      for (int i = n - 1; i >= 0; --i) {
+        T sum = y(i, j);
+        for (size_t k = i + 1; k < n; ++k) {
+          sum -= lu.U(i, k) * z(k, j);  // Ensure these are scalars
+        }
+        z(i, j) = sum / lu.U(i, i);
+      }
+    }
+
+    // If full pivoting was used, apply column permutation to get the solution
+
+    if (lu.full_pivoting) {
+      return lu.Q.to_matrix() * z;
+    } else {
+      // No column permutation needed
+      return z;
+    }
+  }
+
+  // Algorithm 3: Householder reflector based HT reduction
+
+  static std::tuple<Matrix, Matrix, Matrix, Matrix> householder_ht_reduction(
+      const Matrix<T, StoragePolicy>& A_in,
+      const Matrix<T, StoragePolicy>& B_in) {
+    if (!A_in.is_square() || !B_in.is_square() || A_in.rows() != B_in.rows())
+      throw std::invalid_argument(
+          "Matrices A and B must be square and of the same size");
+
+    size_t n = A_in.rows();
+    if (n <= 1) {
+
+      return {A_in, B_in, Matrix::identity(n), Matrix::identity(n)};
+    }
+
+    // Create copies to work with
+    Matrix A = A_in.clone();
+    Matrix B = B_in.clone();
+    // Initialize Q and Z as identity matrices
+    Matrix Q = Matrix::identity(n);
+    Matrix Z = Matrix::identity(n);
+    // Step 2: Calculate the first Householder reflector H1 for B
+    Matrix B_col = B.get_column(0);
+    auto [v1, beta1] = B_col.house_v();
+
+    // Step 3: Apply H1 to A and B from the left and to Q from the right
+    A = A.apply_householder_left(v1, beta1);
+    B = B.apply_householder_left(v1, beta1);
+    Q = Q.apply_householder_right(v1, beta1);
+
+    // Steps 4-10: Main loop for j = 1 to n-2
+    for (size_t j = 0; j < n - 2; j++) {
+      // Step 5: Calculate Householder reflector H2 for A
+      Matrix A_col = A.get_column(j).sub_matrix(j + 1, 0, n - (j + 1), 1);
+
+      auto [v2, beta2] = A_col.house_v();
+      // Expand v2 to match the size needed for applying to the full blocks
+      Matrix v2_expanded(size_t(n - (j + 1)), size_t(1));
+      for (size_t i = 0; i < v2.rows(); i++) {
+        v2_expanded(i, 0) = v2(i, 0);
+      }
+
+      // Step 6: Apply H2 to A and B from the left and to Q from the right
+      Matrix A_block = A.sub_matrix(j + 1, j, n - (j + 1), n - j);
+      A_block = A_block.apply_householder_left(v2_expanded, beta2);
+      A.set_submatrix(j + 1, j, A_block);
+
+      // B(j+1:n, j:n) = H2 * B(j+1:n, j:n)
+      Matrix B_block = B.sub_matrix(j + 1, j, n - (j + 1), n - j);
+      B_block = B_block.apply_householder_left(v2_expanded, beta2);
+      B.set_submatrix(j + 1, j, B_block);
+
+      // Q(:, j+1:n) = Q(:, j+1:n) * H2^H
+      Matrix Q_block = Q.sub_matrix(0, j + 1, n, n - (j + 1));
+      Q_block = Q_block.apply_householder_right(v2_expanded, beta2);
+      Q.set_submatrix(0, j + 1, Q_block);
+
+      // Step 7: Solve the linear system B_{j+1:n, j+1:n} * x = e1
+      Matrix B_submatrix = B.sub_matrix(j + 1, j + 1, n - (j + 1), n - (j + 1));
+      Matrix e1 = Matrix::unit_vector(n - (j + 1), 0);
+      Matrix x = B_submatrix.solve(e1);
+      // Ensure x is properly normalized for H3 calculation
+      // T x_norm = x.norm();
+      // if (x_norm > 0) {
+      //   x = x / x_norm;
+      // }
+      // Step 8: Calculate Householder reflector H3 for x
+      auto [v3, beta3] = x.house_v();
+      // Step 9: Apply H3 to A, B, and Z from the right
+      // A(:, j+1:n) = A(:, j+1:n) * H3
+      Matrix A_right_block = A.sub_matrix(0, j + 1, n, n - (j + 1));
+      A_right_block = A_right_block.apply_householder_right(v3, beta3);
+      A.set_submatrix(0, j + 1, A_right_block);
+
+      // B(:, j+1:n) = B(:, j+1:n) * H3
+      Matrix B_right_block = B.sub_matrix(0, j + 1, n, n - (j + 1));
+      B_right_block = B_right_block.apply_householder_right(v3, beta3);
+      B.set_submatrix(0, j + 1, B_right_block);
+
+      // Z(:, j+1:n) = Z(:, j+1:n) * H3
+      Matrix Z_right_block = Z.sub_matrix(0, j + 1, n, n - (j + 1));
+      Z_right_block = Z_right_block.apply_householder_right(v3, beta3);
+      Z.set_submatrix(0, j + 1, Z_right_block);
+    }
+
+    return {A, B, Q, Z};
+  }
+
+  Matrix apply_householder_left(const Matrix<T, StoragePolicy>& v, T beta) {
+    Matrix A = *this;
+    // w = beta * A^T * v
+    Matrix<T, StoragePolicy> w = beta * (A.transpose() * v);
+    // A = A - v * w^T
+    A = A - v * w.transpose();
+    return A;
+  }
+
+  // Apply Householder reflector from the right: A = A(I - beta*v*v^T)
+
+  Matrix apply_householder_right(const Matrix<T, StoragePolicy>& v, T beta) {
+    Matrix A = *this;
+    // w = beta * A * v
+    Matrix<T, StoragePolicy> w = beta * (A * v);
+    // A = A - w * v^T
+    A = A - w * v.transpose();
+    return A;
+  }
+
+  std::tuple<Matrix<T>, T> house_v() const {
+    size_t m = this->rows();
+    Matrix<T> u(size_t(m), size_t(1));
+    T tau = T(0);
+
+    if (m == 0) {
+      return {u, tau};
+    }
+
     T x0 = (*this)(0, 0);
-    T sigma = T{0};
-    for (size_t i = 1; i < view_rows_; ++i) {
-      sigma += (*this)(i, 0) * (*this)(i, 0);
+    Matrix<T> x_sub = this->view(1, 0, m - 1, 1);
+    T sigma = x_sub.norm();
+
+    if (sigma == T(0)) {
+      u(0, 0) = T(1);
+      return {u, tau};
     }
 
-    // If sigma is zero, no reflection needed
-    if (sigma == T{0}) {
-      Matrix<T, StoragePolicy> u(size_t(view_rows_), size_t(1), T{0});
-      u(0, 0) = T{1};
-      return {u, T{0}};
+    T mu = std::sqrt(x0 * x0 + sigma * sigma);
+    T beta;
+
+    if (x0 <= T(0)) {
+      beta = x0 - mu;
+    } else {
+      beta = -sigma * sigma / (x0 + mu);
     }
 
-    // Compute normalization factor
-    T mu = std::sqrt(x0 * x0 + sigma);
-    T beta = (x0 <= T{0}) ? (x0 - mu) : (-sigma / (x0 + mu));
+    // Set the first component of u
+    u(0, 0) = T(1);
 
-    // Compute reflection factor
-    T tau = T{2} * beta * beta / (sigma + beta * beta);
-
-    // Create Householder vector
-    Matrix<T, StoragePolicy> u(size_t(view_rows_), size_t(1));
-    u(0, 0) = T{1};
-    for (size_t i = 1; i < view_rows_; ++i) {
-      u(i, 0) = (*this)(i, 0) / beta;
+    // Set remaining components and normalize
+    T scale = T(1) / beta;
+    for (size_t i = 1; i < m; ++i) {
+      u(i, 0) = (*this)(i, 0) * scale;
     }
+
+    tau = T(2) * beta * beta / (sigma * sigma + beta * beta);
 
     return {u, tau};
   }
+
+  //end of class
 };
 
 // ==================== Free Functions ====================

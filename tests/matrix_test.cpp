@@ -40,6 +40,20 @@ class BlockJacobiTest : public ::testing::Test {
   }
 };
 
+// Helper function to compare two matrices element-wise
+void assert_matrix_near(const Matrix& actual, const Matrix& expected,
+                        double abs_error = tol) {
+  ASSERT_EQ(actual.rows(), expected.rows());
+  ASSERT_EQ(actual.cols(), expected.cols());
+
+  for (size_t i = 0; i < actual.rows(); ++i) {
+    for (size_t j = 0; j < actual.cols(); ++j) {
+      EXPECT_NEAR(actual(i, j), expected(i, j), abs_error)
+          << "Mismatch at position (" << i << ", " << j << ")";
+    }
+  }
+}
+
 TEST_F(BlockJacobiTest, SolvesSimpleSystem) {
   MatrixD A = {{4, 1, 0, 0}, {1, 4, 1, 0}, {0, 1, 4, 1}, {0, 0, 1, 4}};
   MatrixD x_expected({1.0, 2.0, 3.0, 4.0}, algaber::VectorType::ColumnVector);
@@ -92,8 +106,7 @@ TEST_F(BlockJacobiTest, ConvergesOnLargeSystem) {
 
 TEST_F(BlockJacobiTest, HandlesIllConditionedBlocks) {
   // Create matrix with poorly conditioned but invertible blocks
-  MatrixD A = {
-      {1e6, 1, 0, 0}, {1, 1.0, 0, 0}, {0, 0, 1e6, 1}, {0, 0, 1, 1.0}};
+  MatrixD A = {{1e6, 1, 0, 0}, {1, 1.0, 0, 0}, {0, 0, 1e6, 1}, {0, 0, 1, 1.0}};
   MatrixD x_expected({1.0, -1.0, 2.0, -2.0}, algaber::VectorType::ColumnVector);
   MatrixD b = A * x_expected;
 
@@ -287,7 +300,7 @@ TEST(MatrixTest, SubMatrixAndSlicing) {
   Matrix m1({{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}, {7.0, 8.0, 9.0}});
 
   // Sub-matrix (removes a row and column)
-  Matrix sub = m1.sub_matrix(size_t(1), size_t(1));
+  Matrix sub = m1.minor_matrix(size_t(1), size_t(1));
   EXPECT_EQ(sub.rows(), size_t(2));
   EXPECT_EQ(sub.cols(), size_t(2));
   EXPECT_DOUBLE_EQ(sub(0, 0), 1.0);
@@ -891,6 +904,39 @@ TEST(MatrixTest, HouseV) {
   EXPECT_NEAR(std::abs(result2(0, 0)), norm_v2, 1e-10);
 }
 
+TEST(HouseVTest, NonZeroVector) {
+  Matrix x(size_t(3), size_t(1));
+  x(0, 0) = 3.0;
+  x(1, 0) = 4.0;
+  x(2, 0) = 0.0;
+
+  auto [u, tau] = x.house_v();
+
+  // Apply Householder transformation: Hx = x - tau * u * (u^T * x)
+  Matrix u_transposed = u.transpose();
+  Matrix Hx = x - u * (tau * (u_transposed * x));
+
+  // Check that elements below the first are zero
+  EXPECT_NEAR(Hx(0, 0), 5.0, 1e-6);  // Norm of [3,4,0] is 5
+  EXPECT_NEAR(Hx(1, 0), 0.0, 1e-6);
+  EXPECT_NEAR(Hx(2, 0), 0.0, 1e-6);
+}
+
+TEST(HouseVTest, ZeroSubVector) {
+  Matrix x(size_t(3), size_t(1));
+  x(0, 0) = 5.0;
+  x(1, 0) = 0.0;
+  x(2, 0) = 0.0;
+
+  auto [u, tau] = x.house_v();
+
+  // u should be [1; 0; 0], tau = 0 (no transformation needed)
+  EXPECT_EQ(u(0, 0), 1.0);
+  EXPECT_EQ(u(1, 0), 0.0);
+  EXPECT_EQ(u(2, 0), 0.0);
+  EXPECT_EQ(tau, 0.0);
+}
+
 TEST(MatrixTest, BalancedFormFast) {
   // Create a test matrix with condition number issues
   Matrix m({{1.0, 1000.0}, {0.001, 1.0}});
@@ -1084,5 +1130,91 @@ TEST(SolveTriangularTest, MultipleRHSColumns) {
   Matrix expected(2, 2, {3.0, 6.0, 0.5, 1.25});
   Matrix X = L.solve_triangular(rhs, true, false);
   EXPECT_TRUE(matrix_near(X, expected));
+}
+
+TEST(HouseholderHTReductionTest, 4x4MatrixReduction) {
+  // Define matrix A as per the user's example
+  Matrix A(size_t(4), size_t(4));
+  A(0, 0) = 4.0;
+  A(0, 1) = 1.0;
+  A(0, 2) = -2.0;
+  A(0, 3) = 2.0;
+  A(1, 0) = 1.0;
+  A(1, 1) = 2.0;
+  A(1, 2) = 0.0;
+  A(1, 3) = 1.0;
+  A(2, 0) = -2.0;
+  A(2, 1) = 0.0;
+  A(2, 2) = 3.0;
+  A(2, 3) = -2.0;
+  A(3, 0) = 2.0;
+  A(3, 1) = 1.0;
+  A(3, 2) = -2.0;
+  A(3, 3) = -1.0;
+
+  // Define B as a non-triangular matrix
+  Matrix B(size_t(4), size_t(4));
+  B(0, 0) = 2.0;
+  B(0, 1) = 1.0;
+  B(0, 2) = 1.0;
+  B(0, 3) = 1.0;
+  B(1, 0) = 1.0;
+  B(1, 1) = 2.0;
+  B(1, 2) = 1.0;
+  B(1, 3) = 1.0;
+  B(2, 0) = 1.0;
+  B(2, 1) = 1.0;
+  B(2, 2) = 2.0;
+  B(2, 3) = 1.0;
+  B(3, 0) = 1.0;
+  B(3, 1) = 1.0;
+  B(3, 2) = 1.0;
+  B(3, 3) = 2.0;
+
+  auto [A_red, B_red, Q, Z] = Matrix::householder_ht_reduction(A, B);
+
+  // Verify A_red is upper Hessenberg
+  for (size_t i = 2; i < A_red.rows(); ++i) {
+    for (size_t j = 0; j < i - 1; ++j) {
+      EXPECT_NEAR(A_red(i, j), 0.0, tol)
+          << "A not upper Hessenberg at (" << i << "," << j << ")";
+    }
+  }
+  // Verify B_red is upper triangular
+  for (size_t i = 0; i < B_red.rows(); ++i) {
+    for (size_t j = 0; j < i; ++j) {
+      EXPECT_NEAR(B_red(i, j), 0.0, tol)
+          << "B not upper triangular at (" << i << "," << j << ")";
+    }
+  }
+
+  // Verify Q and Z are orthogonal (Q^T Q = I, Z^T Z = I)
+  Matrix QTQ = Q.transpose() * Q;
+  Matrix ZTZ = Z.transpose() * Z;
+  Matrix I = Matrix::identity(4);
+  assert_matrix_near(QTQ, I);
+  assert_matrix_near(ZTZ, I);
+
+  // Verify Q^T A Z = A_red
+  Matrix QTAZ = Q.transpose() * A * Z;
+  assert_matrix_near(QTAZ, A_red);
+
+  // Verify Q^T B Z = B_red
+  Matrix QTBZ = Q.transpose() * B * Z;
+  assert_matrix_near(QTBZ, B_red);
+}
+
+TEST(HouseholderHTReductionTest, IdentityMatrices) {
+  // Test with A and B as identity matrices
+  size_t n = 4;
+  Matrix A = Matrix::identity(n);
+  Matrix B = Matrix::identity(n);
+
+  auto [A_red, B_red, Q, Z] = Matrix::householder_ht_reduction(A, B);
+
+  assert_matrix_near(A_red, A);
+  assert_matrix_near(B_red, B);
+  assert_matrix_near(Q, Matrix::identity(n));
+  assert_matrix_near(Z, Matrix::identity(n));
 }
 // Main function is provided by gtest_main.o

@@ -1,0 +1,148 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(Matrix<T> A_in, size_t b)
+    // A_in is the matrix to be reduced.
+    // b is the block size.
+    // The function returns the Hessenberg matrix A.
+    // It is assumed that A_in can be modified (or a copy is made).
+
+    Matrix<T> A = A_in // Operate on A (either modifies A_in or a copy)
+    n = num_rows(A)    // Assuming A is an n x n matrix
+
+    // Loop over the matrix by blocks of size b
+    // k is the 1-based starting row/column index of the current panel
+    for k = 1 to n-1 step b 
+        // kb is the actual block size for the current panel.
+        // It might be smaller than b if the remaining part of the matrix is smaller than b.
+        // The panel is A(k:n, k:k+kb-1).
+        kb = min(b, n - k) 
+        if kb < 1 then // If panel width is less than 1 (e.g., k is already too close to n)
+            break      // No more full columns to form a panel, exit loop.
+        end if
+
+        // Panel Factorization:
+        // This step reduces the panel A(k:n, k:k+kb-1) to Hessenberg form.
+        // HESSRED_GQVDG_UNB is an unblocked Hessenberg reduction function.
+        // It modifies A(k:n, k:k+kb-1) in place.
+        // It computes and returns:
+        // U_panel: (n-k+1) x kb matrix - Householder vectors.
+        //          Defines Q_panel such that Q_panel^T = (I - U_panel * T_panel⁻¹ * U_panelᵀ).
+        // Z_panel: (n-k+1) x kb matrix - Corresponds to A_panel_original * U_panel.
+        // T_panel: kb x kb matrix      - Upper triangular matrix for accumulating Householder transformations.
+        
+        // Note: The exact signature and behavior of HESSRED_GQVDG_UNB (e.g., how A is passed/modified)
+        // would need to be strictly defined. Assuming it operates on A and returns U, Z, T.
+        // Let's assume HESSRED_GQVDG_UNB takes the relevant submatrix of A, modifies it, and returns U, Z, T.
+        // Or, more practically, it might take A, k, kb and modify A in place, returning U, Z, T.
+        // For this pseudocode, we'll use the provided call structure.
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(A, k, kb) // Modifies A(k:n, k:k+kb-1)
+
+        // --- Trailing Matrix Updates ---
+        // Check if there's a trailing submatrix to update.
+        // Trailing columns are from k+kb to n.
+        if k + kb <= n then 
+            // --- Right Update Part ---
+            // Corresponds to ATR := ATR * (I - U_panel * T_panel⁻¹ * U_panelᵀ)
+            // ATR here is A(1:k-1, k:n), which includes columns of the current panel (A_01)
+            // and columns to the right of the panel (A_02).
+            // Q_p = (I - U_panel * T_panel⁻¹ * U_panelᵀ)
+            // Update is A(1:k-1, k:n) := A(1:k-1, k:n) * Q_p
+            // which expands to A(1:k-1, k:n) := A(1:k-1, k:n) - ( (A(1:k-1, k:n) * U_panel) * T_panel⁻¹ ) * U_panelᵀ
+
+            if k > 1 then // This update only happens if there are rows above the current panel (k=1 means no rows above)
+                // A_view_AbovePanel_RightOfProcessed is A(1:k-1, k:n)
+                // Number of rows = k-1. Number of columns = n-k+1.
+                A_view_ATR = submatrix(A, 1, k-1, k, n) 
+
+                // Temp_Y_atr = A_view_ATR * U_panel
+                // A_view_ATR is (k-1) x (n-k+1). U_panel is (n-k+1) x kb.
+                // Product Temp_Y_atr is (k-1) x kb.
+                Temp_Y_atr = matrix_multiply(A_view_ATR, U_panel)
+                
+                // Temp_W_atr = Temp_Y_atr * T_panel⁻¹
+                // This solves W * T_panel = Temp_Y_atr for W.
+                // Temp_Y_atr is (k-1) x kb. T_panel is kb x kb. Result Temp_W_atr is (k-1) x kb.
+                Temp_W_atr = solve_linear_system_rhs_multiply(Temp_Y_atr, T_panel, operation='X * T^-1') 
+                             // Equivalent to user's: Temp_W_atr = solve(T_panelᵀ, Temp_Y_atrᵀ)ᵀ
+
+                // A_view_ATR_update = Temp_W_atr * U_panelᵀ
+                // Temp_W_atr is (k-1) x kb. U_panelᵀ is kb x (n-k+1). Result is (k-1) x (n-k+1).
+                A_view_ATR_update = matrix_multiply(Temp_W_atr, transpose(U_panel))
+                
+                // Apply update: A(1:k-1, k:n) -= A_view_ATR_update
+                submatrix_subtract_inplace(A, 1, k-1, k, n, A_view_ATR_update)
+            end if
+
+            // --- Left Update Part ---
+            // Corresponds to Atrail := (I - U_panel * T_panel⁻ᵀ * U_panelᵀ)ᵀ * (Atrail - Z_panel * T_panel⁻¹ * U_panelᵀ)
+            // where Atrail is A(k:n, k+kb:n).
+            // Let Q_p^T = (I - U_panel * T_panel⁻¹ * U_panelᵀ). Then Q_p_conj_T = (I - U_panel * T_panel⁻ᵀ * U_panelᵀ).
+            // Update is Atrail := Q_p_conj_T * (Atrail - Z_panel * T_panel⁻¹ * U_panelᵀ)
+            
+            // A_view_Atrail is A(k:n, k+kb:n)
+            // Number of rows = n-k+1. Number of columns = n-(k+kb)+1.
+            A_view_Atrail = submatrix(A, k, n, k+kb, n)
+
+            // 1. Compute Inner_Term_Update = Z_panel * T_panel⁻¹ * U_panelᵀ
+            //    X_Tinv_UT = T_panel⁻¹ * U_panelᵀ
+            //    T_panel is kb x kb. U_panelᵀ is kb x (n-k+1). Result X_Tinv_UT is kb x (n-k+1).
+            X_Tinv_UT = solve_linear_system_rhs_multiply(transpose(U_panel), T_panel, operation='T^-1 * X')
+                          // Equivalent to user's: X_Tinv_UT = solve(T_panel, U_panelᵀ)
+            
+            //    Inner_Term_Z_val = Z_panel * X_Tinv_UT
+            //    Z_panel is (n-k+1) x kb. X_Tinv_UT is kb x (n-k+1). Result is (n-k+1) x (n-k+1).
+            Inner_Term_Z_val = matrix_multiply(Z_panel, X_Tinv_UT)
+
+            //    A_Atrail_prime = A_view_Atrail - Inner_Term_Z_val (applied to the leading square part of A_view_Atrail)
+            //    If A_view_Atrail has fewer columns than n-k+1, this subtraction applies to A(k:n, k+kb : k+kb + (n-k+1) -1)
+            //    For simplicity, assume conformable subtraction or appropriate slicing.
+            //    Let's define A_Atrail_prime as a temporary matrix of same dimensions as A_view_Atrail.
+            A_Atrail_prime = copy(A_view_Atrail)
+            // Subtract Inner_Term_Z_val from the leading (n-k+1) columns of A_Atrail_prime.
+            // Number of columns to update in this step is min(num_cols(A_view_Atrail), n-k+1)
+            cols_to_update_inner = min(num_cols(A_view_Atrail), n-k+1)
+            submatrix_subtract_inplace(A_Atrail_prime, 1, n-k+1, 1, cols_to_update_inner, 
+                                       submatrix(Inner_Term_Z_val, 1, n-k+1, 1, cols_to_update_inner))
+
+
+            // 2. Apply (I - U_panel * T_panel⁻ᵀ * U_panelᵀ) to A_Atrail_prime
+            //    Result = A_Atrail_prime - U_panel * (T_panel⁻ᵀ * (U_panelᵀ * A_Atrail_prime))
+            
+            //    V_trail = U_panelᵀ * A_Atrail_prime
+            //    U_panelᵀ is kb x (n-k+1). A_Atrail_prime is (n-k+1) x num_cols(A_view_Atrail).
+            //    Result V_trail is kb x num_cols(A_view_Atrail).
+            V_trail = matrix_multiply(transpose(U_panel), A_Atrail_prime)
+            
+            //    W_trail = T_panel⁻ᵀ * V_trail
+            //    This solves T_panelᵀ * W = V_trail for W.
+            //    V_trail is kb x num_cols(A_view_Atrail). T_panelᵀ is kb x kb. Result W_trail is kb x num_cols(A_view_Atrail).
+            W_trail = solve_linear_system_lhs_multiply(transpose(T_panel), V_trail, operation='T^-1 * X')
+                        // Equivalent to user's: W_trail = solve(T_panelᵀ, V_trail)
+            
+            //    A_view_Atrail_update_outer = U_panel * W_trail
+            //    U_panel is (n-k+1) x kb. W_trail is kb x num_cols(A_view_Atrail). Result is (n-k+1) x num_cols(A_view_Atrail).
+            A_view_Atrail_update_outer = matrix_multiply(U_panel, W_trail)
+
+            //    Update A(k:n, k+kb:n) = A_Atrail_prime - A_view_Atrail_update_outer
+            submatrix_assign_from_subtraction(A, k, n, k+kb, n, A_Atrail_prime, A_view_Atrail_update_outer)
+            
+        end if // end of trailing matrix update
+    end for // end of loop over k
+
+    return A
+end function
+
+// Helper function stubs (definitions depend on specific matrix library)
+// num_rows(Matrix M) -> integer
+// min(integer a, integer b) -> integer
+// submatrix(Matrix M, r_start, r_end, c_start, c_end) -> MatrixView or Copy
+// matrix_multiply(Matrix A, Matrix B) -> Matrix
+// transpose(Matrix M) -> Matrix
+// solve_linear_system_rhs_multiply(Matrix T, Matrix Y, operation_string) -> Matrix (e.g. Y * T^-1)
+// solve_linear_system_lhs_multiply(Matrix T, Matrix Y, operation_string) -> Matrix (e.g. T^-1 * Y)
+// submatrix_subtract_inplace(Matrix Target, r_s, r_e, c_s, c_e, Matrix ToSubtract)
+// copy(Matrix M) -> Matrix
+// submatrix_assign_from_subtraction(Matrix Target, r_s, r_e, c_s, c_e, Matrix M1, Matrix M2) // Target_sub = M1 - M2
+
+// Assumed signature for the unblocked routine:
+// function [U_panel, Z_panel, T_panel] HESSRED_GQVDG_UNB(Matrix A_full, size_t k_panel_start, size_t kb_panel_width)
+// - Modifies A_full(k_panel_start:n, k_panel_start:k_panel_start+kb_panel_width-1) in place.
+// - Returns U_panel, Z_panel, T_panel.

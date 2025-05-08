@@ -1,0 +1,126 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked(size_t b)
+    Matrix<T> A = *this
+    n = size(A, 1)
+
+    for k = 1 to n-1 step b  // k is the starting row/column of the current panel (1-based)
+        kb = min(b, n - k)   // Actual block size for the current panel
+
+        // Panel Factorization:
+        // This function reduces A(k:n, k:k+kb-1) to Hessenberg form.
+        // It computes U_panel, Z_panel, T_panel based on this panel.
+        // U_panel: (n-k+1) x kb - Householder vectors from the panel.
+        // Z_panel: (n-k+1) x kb - Corresponds to A_panel * U_panel_reflectors for the panel.
+        // T_panel: kb x kb      - Triangular matrix for accumulating Householder transformations.
+        // We assume HESSRED_GQVDG_UNB modifies A(k:n, k:k+kb-1) and returns these matrices.
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(A, k, kb)
+
+        // Check if there's a trailing submatrix to update
+        if k + kb <= n  // Using <= to include the case where k+kb-1 is the last col/row
+            
+            // Define views for trailing matrix parts (using 1-based indexing consistent with k)
+            // ATR_view: A(1:k-1, k+kb : n)
+            // Atrail_view: A(k:n, k+kb : n)
+
+            // --- Right Update part (corresponds to ATR := ATR * (I - U T⁻¹ Uᵀ)) ---
+            // This applies to rows above the current panel, and columns to the right of the panel.
+            if k > 1 // Only if ATR_view exists
+                A_ATR_view = A[1:k-1, k+kb:n]
+                
+                // Compute Y = A_ATR_view * U_panel
+                // Note: U_panel are vectors that are non-zero from row k downwards in original matrix terms.
+                // For A_ATR_view * U_panel to be conformant and meaningful in the context of
+                // I - U T^-1 U^T, U_panel must be treated as n x kb matrix where rows 1:k-1 are zero.
+                // Or, more likely, the U_panel here should be specifically the part of Householder vectors
+                // that operate on columns k to k+kb-1 when applying the transformation from the right.
+                // Assuming U_panel is the (n-k+1) x kb block of Householder vectors correctly used.
+                // The multiplication A_ATR_view * U_panel implies using U_panel's column vectors.
+                
+                // Let Q_U = (I - U_panel * T_panel⁻¹ * U_panelᵀ)
+                // A_ATR_view := A_ATR_view * Q_U
+                //             = A_ATR_view - (A_ATR_view * U_panel) * T_panel⁻¹ * U_panelᵀ
+                
+                Temp_Y_atr = A_ATR_view * U_panel  // (k-1) x kb
+                // W_atr = Temp_Y_atr * T_panel⁻¹
+                Temp_W_atr = solve(T_panelᵀ, Temp_Y_atrᵀ)ᵀ // Solves W_atr * T_panel = Temp_Y_atr
+                A[1:k-1, k+kb:n] -= Temp_W_atr * U_panelᵀ
+            end
+
+            // --- Left Update part (corresponds to Atrail := (I - U T⁻¹ Uᵀ)ᵀ * (Atrail - Z T⁻¹ Uᵀ)) ---
+            // This applies to rows from k downwards, and columns to the right of the panel.
+            A_Atrail_view = A[k:n, k+kb:n]
+
+            // 1. Compute Inner_Term = Z_panel * T_panel⁻¹ * U_panelᵀ
+            //    X = T_panel⁻¹ * U_panelᵀ  (kb x (n-k+1))
+            X_Tinv_UT = solve(T_panel, U_panelᵀ) // Solves T_panel * X_Tinv_UT = U_panelᵀ
+            Inner_Term_Z = Z_panel * X_Tinv_UT       // (n-k+1) x (n-k+1) (if U_panel is (n-k+1) x kb, Z is (n-k+1) x kb)
+                                                  // This dimensionality seems problematic.
+                                                  // U_panel^T is kb x (n-k+1). X_Tinv_UT is kb x (n-k+1).
+                                                  // Z_panel is (n-k+1) x kb.
+                                                  // Inner_Term_Z should be (n-k+1) x (n-k+1).
+
+            // Recheck: Z_panel is (n-k+1) x kb. U_panel is (n-k+1) x kb. T_panel is kb x kb.
+            // U_panel^T is kb x (n-k+1).
+            // X = solve(T_panel, U_panel^T) means T_panel * X = U_panel^T. So X is kb x (n-k+1).
+            // Inner_Term_Z = Z_panel * X. This product is ((n-k+1) x kb) * (kb x (n-k+1)) = (n-k+1) x (n-k+1). Correct.
+
+            A_Atrail_prime = A_Atrail_view - Inner_Term_Z
+
+            // 2. Apply (I - U_panel * T_panel⁻ᵀ * U_panelᵀ) to A_Atrail_prime
+            //    Result = A_Atrail_prime - U_panel * T_panel⁻ᵀ * U_panelᵀ * A_Atrail_prime
+            V_trail = U_panelᵀ * A_Atrail_prime           // kb x (cols_Atrail)
+            W_trail = solve(T_panelᵀ, V_trail)          // Solves T_panelᵀ * W_trail = V_trail. So W_trail = T_panel⁻ᵀ * V_trail.
+            A[k:n, k+kb:n] = A_Atrail_prime - U_panel * W_trail
+        end
+    end
+    return A
+end
+
+function HessenbergPanel HESSRED_GQVDG_UNB(size_t k, size_t kb)
+    Matrix<T> A = *this
+    n = size(A, 1)
+    m = n - k + 1
+    U_panel = zeros(m, kb)
+    T_panel = zeros(kb, kb)
+    Z_panel = zeros(n, kb)
+
+    for j = 1 to kb
+        a_j = A[k+j-1:n, k+j-1]
+        if j > 1
+            U_prev = U_panel[1:m, 1:j-1]
+            T_prev = T_panel[1:j-1, 1:j-1]
+            y = U_prevᵀ * a_j
+            z = solve(T_prev, y)
+            a_j -= U_prev * z
+        end
+        [u, tau] = Housev(a_j)
+        U_panel[j:m, j] = [1; u]
+        T_panel[j, j] = tau
+        if j < kb
+            Z_panel[1:n, j] = A[1:n, k+j-1:n] * U_panel[1:m, j]
+            for i = j+1 to kb
+                T_panel[j, i] = U_panel[1:m, i]ᵀ * U_panel[1:m, j]
+            end
+            A[k+j-1:n, k+j:k+kb-1] -= tau * (u * (uᵀ * A[k+j-1:n, k+j:k+kb-1]))
+        end
+        A[k+j-1:n, k+j-1] = [a_j[1]; -tau * norm(a_j[2:]); zeros(n - (k + j))]
+    end
+    return U_panel, Z_panel, T_panel
+end
+function [Vector<T> u, T tau] Housev(Vector<T> x)
+    sigma = norm(x[2:])²
+    u = x
+    if sigma == 0
+        tau = 0
+        u[1] = 1
+        u[2:] = 0
+        return (u, tau)
+    mu = sqrt(x[1]² + sigma)
+    if x[1] <= 0
+        beta = x[1] - mu
+    else
+        beta = -sigma / (x[1] + mu)
+    tau = 2 * beta² / (sigma + beta²)
+    u = x / beta
+    u[1] = 1
+    return (u, tau)
+end

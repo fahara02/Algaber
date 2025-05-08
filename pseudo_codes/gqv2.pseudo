@@ -1,0 +1,93 @@
+function Matrix<T> HessenbergReduceGQvdGBlocked( size_t b)
+    Matrix<T> A=*this;
+    # Input: A (n x n matrix), b (block size)
+    # Output: A overwritten with upper Hessenberg form
+    n = size(A, 1)
+    for k = 1 to n-2 step b
+        kb = min(b, n - k - 1)  # Adjust block size for the last panel
+        # Compute panel factorization using GQvdG unblocked algorithm
+        [U_panel, Z_panel, T_panel] = HESSRED_GQVDG_UNB(A, k, kb)
+        
+        # Update trailing matrix with left and right transformations
+        if k + kb <= n
+            # Apply left update: A(k:n, k+kb:n) = (I - U T⁻¹ Uᵀ)ᵀ * A(k:n, k+kb:n)
+            V = U_panelᵀ * A[k:n, k+kb:n]
+            W = solve(T_panel, V)  # T_panel is upper triangular
+            A[k:n, k+kb:n] = A[k:n, k+kb:n] - U_panel * W
+            
+            # Apply right update: A[1:n, k+kb:n] = A[1:n, k+kb:n] * (I - U T⁻¹ Uᵀ)
+            Y = A[1:n, k+kb:n] * U_panel
+            X = Y * solve(T_panelᵀ, I)  # T_panelᵀ is lower triangular
+            A[1:n, k+kb:n] = A[1:n, k+kb:n] - X * U_panelᵀ
+        end
+    end
+    return A
+end
+
+struct HessenbergPanel {
+    Matrix U_panel;  // Householder vectors
+    Matrix Z_panel;  // Intermediate results for trailing updates
+    Matrix T_panel;  // Triangular factor for accumulated transformations
+  };
+
+
+function HessenbergPanel HESSRED_GQVDG_UNB( size_t k, size_t kb)
+     Matrix<T> A=*this;
+    # Processes the panel starting at column k with block size kb
+    # Output: U_panel (Householder vectors), T_panel (triangular factor), Z_panel (A*U)
+    m = n - k + 1  # Rows in the panel
+    U_panel = zeros(m, kb)
+    T_panel = zeros(kb, kb)
+    Z_panel = zeros(m, kb)
+    
+    for j = 1 to kb
+        # Current column to process in the panel (global column index: k + j - 1)
+        a_j = A[k+j-1:n, k+j-1]  # Column vector from diagonal downward
+        
+        # Apply previous transformations to a_j (from U_panel and T_panel)
+        if j > 1
+            # a_j = a_j - U_prev * (T_prev⁻¹ * (U_prevᵀ * a_j))
+            U_prev = U_panel[j:m, 1:j-1]
+            T_prev = T_panel[1:j-1, 1:j-1]
+            y = U_prevᵀ * a_j
+            z = solve(T_prev, y)
+            a_j = a_j - U_prev * z
+        end
+        
+        # Compute Householder vector for a_j
+        [u, tau] = Housev(a_j)
+        U_panel[j:m, j] = u
+        T_panel[j, j] = tau
+        
+        # Compute Z_panel[j:m, j] = A[k+j-1:n, k+j:n+kb-1] * u (trailing part of the panel)
+        if j < kb
+            Z_panel[j:m, j] = A[k+j-1:n, k+j:k+kb-1] * u
+        end
+        
+        # Update T_panel with cross terms (U_iᵀ * u_j for i < j)
+        if j < kb
+            for i = j+1 to kb
+                T_panel[j, i] = U_panel[j:m, i]ᵀ * u
+            end
+        end
+        
+        # Apply Householder reflection to the current column
+        A[k+j-1:n, k+j-1] = a_j - tau * (u * (uᵀ * a_j))
+    end
+    return U_panel, Z_panel, T_panel
+end
+
+def Housev(Vector<T> x):
+    # Computes Householder vector u and scalar tau such that (I - tau*u*uᵀ)x is zeroed below the first element
+    sigma = norm(x[1:])²  # Squared norm of x[1..end]
+    if sigma == 0:
+        return (x, 0)
+    mu = sqrt(x[0]² + sigma)
+    if x[0] <= 0:
+        beta = x[0] - mu  # Ensures u[0] = 1 after scaling
+    else:
+        beta = -sigma / (x[0] + mu)
+    tau = 2 * beta² / (sigma + beta²)
+    u = x / beta
+    u[0] = 1  # Set first element to 1 as per convention
+    return (u, tau)
