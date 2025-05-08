@@ -28,11 +28,13 @@
 // 1. Matrix Decompositions:
 //    ✅ LU decomposition (to_LU implemented with full pivoting)
 //    ✅ LDU decomposition (to_LDU implemented)
-//    ❌ QR decomposition (Householder/Givens/Gram-Schmidt)
-//       ⚠️ Partial: HouseV implementation exists
+//    ✅ QR decomposition (Householder)
 //    ✅ Cholesky decomposition (for symmetric positive definite)
-//    ❌ Eigenvalue decompositions (Power iteration, QR algorithm)
-//       ⚠️ Partial: Matrix balancing implemented (BalancedForm)
+//    ⚠️ Eigenvalue decompositions
+//       ✅ Matrix balancing implemented (BalancedForm)
+//       ✅ Hessenberg form implemented (hessenberg_decomposition)
+//       ✅ Hessenberg-Triangular reduction implemented
+//       ❌ QR algorithm for eigenvalues
 //    ❌ SVD (Singular Value Decomposition)
 
 // 2. Solvers:
@@ -41,6 +43,7 @@
 //    ❌ Least squares solver (using QR/SVD)
 //    ❌ Sparse matrix solvers (Conjugate Gradient, GMRES)
 //    ✅ solve_triangular implemented
+//    ✅ Block Jacobi implemented
 
 // 3. Matrix Operations:
 //    ✅ Kronecker product
@@ -53,6 +56,7 @@
 //       ⚠️ Uses recursive method for small matrices, REF for large
 //    ✅ Inverse implemented
 //       ⚠️ Uses adjugate for small matrices, REF for large - could use pivoted LU
+//    ✅ Matrix form checks (is_hessenberg, etc.)
 
 // TODO: Performance Optimizations
 // 1. Block matrix operations ✅
