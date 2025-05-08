@@ -536,6 +536,18 @@ class Matrix {
     return true;
   }
 
+  bool is_hessenberg(double tol) const {
+    Matrix A = *this;
+    size_t n = A.rows();
+    for (size_t j = 0; j < n; ++j) {
+      for (size_t i = j + 2; i < n; ++i) {
+        if (std::abs(A(i, j)) > tol)
+          return false;
+      }
+    }
+    return true;
+  }
+
   // ===== Element Access =====
 
   T& operator()(size_t row, size_t col) {
@@ -578,9 +590,7 @@ class Matrix {
   Matrix get_row(size_t row) const { return view(row, 0, 1, view_cols_); }
 
   // Get entire column as new matrix
-  Matrix get_column(size_t col) const {
-    return view(0, col, view_rows_, 1);
-  }
+  Matrix get_column(size_t col) const { return view(0, col, view_rows_, 1); }
 
   // ===== Block Manipulation Utilities =====
   Matrix get_block(size_t row_start, size_t col_start, size_t rows,
@@ -692,8 +702,6 @@ class Matrix {
     size_t new_size = all_data.size();
     size_t new_rows = new_size / view_cols_;
     Matrix temp(new_rows, view_cols_);
-
-    // Fill new matrix
     for (size_t i = 0; i < new_size && i < new_rows * view_cols_; i++) {
       temp(i / view_cols_, i % view_cols_) = all_data[i];
     }
@@ -725,8 +733,6 @@ class Matrix {
     size_t new_size = all_data.size();
     size_t new_rows = (new_size + view_cols_ - 1) / view_cols_;
     Matrix temp(new_rows, view_cols_);
-
-    // Fill new matrix
     for (size_t i = 0; i < new_size; i++) {
       temp(i / view_cols_, i % view_cols_) = all_data[i];
     }
@@ -4061,8 +4067,8 @@ class Matrix {
     Matrix<T> A = *this;  // Create a copy to modify
     size_t n = A.rows();
 
-    for (size_t k = 0; k < n - 1; k += b) {
-      size_t kb = std::min(b, n - k - 1);  // Actual block size
+    for (size_t k = 0; k + 2 < n; k += b) {
+      size_t kb = std::min(b, n - k - 2);  // Actual block size
 
       // Perform panel factorization
       auto [U_panel, Z_panel, T_panel] = A.hessenberg_panel(k, kb);
@@ -4098,8 +4104,8 @@ class Matrix {
     return A;
   }
 
-  std::tuple<Matrix<T>, Matrix<T>, Matrix<T>, Matrix<T>> hessenberg_panel(size_t k,
-                                                               size_t b) {
+  std::tuple<Matrix<T>, Matrix<T>, Matrix<T>, Matrix<T>> hessenberg_panel(
+      size_t k, size_t b) {
     size_t n = this->rows();
     size_t m = n - k;
     Matrix<T> U_panel(size_t(m), size_t(b));
@@ -4119,7 +4125,7 @@ class Matrix {
       // Apply previous transformations to current column
       if (j > 0) {
         Matrix<T> U_prev = U_panel.view(0, 0, m, j);
-        Matrix<T> current_col = this->view(k, col, m, 1);
+        Matrix<T> current_col = this->view(k + j + 1, col, n - (k + j + 1), 1);
         Matrix<T> y = U_prev.transpose() * current_col;
 
         Matrix<T> T_sub = T_panel.view(0, 0, j, j);
@@ -4187,14 +4193,6 @@ class Matrix {
     // Precompute PB = P * b
     Matrix PB = lu.P.to_matrix() * b;
 
-    // for (size_t i = 0; i < n; ++i) {
-    //   for (size_t j = 0; j < m; ++j) {
-    //     pb(i, j) = b(lu.P[i], j);
-    //   }
-    // }
-
-    // Forward substitution to solve L * y = P * b
-
     for (size_t j = 0; j < m; ++j) {
       for (size_t i = 0; i < n; ++i) {
         T sum = PB(i, j);
@@ -4224,6 +4222,73 @@ class Matrix {
       // No column permutation needed
       return z;
     }
+  }
+
+  std::tuple<Matrix, Matrix> qr_decomposition() const {
+    if (view_rows_ < view_cols_)
+      throw std::invalid_argument("QR decomposition requires rows >= columns");
+
+    size_t m = view_rows_;
+    size_t n = view_cols_;
+    Matrix Q = Matrix::identity(m);
+    Matrix R = this->clone();
+    for (size_t j = 0; j < n; j++) {
+      // Extract column
+      Matrix x = R.sub_matrix(j, j, m - j, 1);
+      // Compute Householder reflection
+      auto [v, beta] = x.house_v();
+
+      // Apply to R
+      Matrix R_sub = R.sub_matrix(j, j, m - j, n - j);
+      R_sub = R_sub.apply_householder_left(v, beta);
+      R.set_block(j, j, R_sub);
+      // Apply to Q
+      Matrix Q_sub = Q.sub_matrix(0, j, m, m - j);
+      Q_sub = Q_sub.apply_householder_right(v, beta);
+      Q.set_block(0, j, Q_sub);
+    }
+
+    return {Q, R};
+  }
+
+  std::tuple<Matrix, Matrix> hessenberg_decomposition() const {
+    if (!is_square())
+      throw std::invalid_argument(
+          "Hessenberg decomposition requires a square matrix");
+
+    size_t n = view_rows_;
+    Matrix H = this->clone();
+    Matrix Q = Matrix::identity(n);
+
+    for (size_t k = 0; k + 2 < n; k++) {
+      // Extract column
+      Matrix x = H.sub_matrix(k + 1, k, n - (k + 1), 1);
+      // Compute Householder reflection
+      auto [v, beta] = x.house_v();
+      // Expand v to match the size needed for applying to the full blocks
+      Matrix v_expanded(size_t(n - (k + 1)), size_t(1));
+      for (size_t i = 0; i < v.rows(); i++) {
+        v_expanded(i, 0) = v(i, 0);
+      }
+
+      // Apply to H from both sides
+      // First from the left: H = P * H
+      Matrix H_left = H.sub_matrix(k + 1, k, n - (k + 1), n - k);
+      H_left = H_left.apply_householder_left(v_expanded, beta);
+      H.set_submatrix(k + 1, k, H_left);
+
+      // Then from the right: H = H * P
+      Matrix H_right = H.sub_matrix(0, k + 1, n, n - (k + 1));
+      H_right = H_right.apply_householder_right(v_expanded, beta);
+      H.set_submatrix(0, k + 1, H_right);
+
+      // Update Q
+      Matrix Q_sub = Q.sub_matrix(0, k + 1, n, n - (k + 1));
+      Q_sub = Q_sub.apply_householder_right(v_expanded, beta);
+      Q.set_submatrix(0, k + 1, Q_sub);
+    }
+
+    return {H, Q};
   }
 
   // Algorithm 3: Householder reflector based HT reduction
@@ -4257,7 +4322,7 @@ class Matrix {
     Q = Q.apply_householder_right(v1, beta1);
 
     // Steps 4-10: Main loop for j = 1 to n-2
-    for (size_t j = 0; j < n - 2; j++) {
+    for (size_t j = 0; j + 2 < n; j++) {
       // Step 5: Calculate Householder reflector H2 for A
       Matrix A_col = A.get_column(j).sub_matrix(j + 1, 0, n - (j + 1), 1);
 
@@ -4309,6 +4374,225 @@ class Matrix {
       Matrix Z_right_block = Z.sub_matrix(0, j + 1, n, n - (j + 1));
       Z_right_block = Z_right_block.apply_householder_right(v3, beta3);
       Z.set_submatrix(0, j + 1, Z_right_block);
+    }
+
+    return {A, B, Q, Z};
+  }
+
+  std::tuple<Matrix, Matrix, Matrix, Matrix>
+  householder_ht_reduction_single_column(const Matrix& A_sub,
+                                         const Matrix& B_sub, size_t col_idx) {
+
+    size_t n = A_sub.rows();
+    // Create copies to work with
+    Matrix A = A_sub.clone();
+    Matrix B = B_sub.clone();
+    // Initialize Q and Z as identity matrices
+    Matrix Q = Matrix::identity(n);
+    Matrix Z = Matrix::identity(n);
+    // This is a simplified version that focuses only on reducing column col_idx
+
+    // Calculate Householder reflector for column col_idx
+    Matrix A_col =
+        A.get_column(col_idx).sub_matrix(col_idx + 1, 0, n - (col_idx + 1), 1);
+
+    auto [v, beta] = A_col.house_v();
+
+    // Create full-sized reflector vector padded with zeros
+    Matrix v_full = Matrix::zeros(n, 1);
+    for (size_t i = 0; i < v.rows(); i++) {
+      v_full(col_idx + 1 + i, 0) = v(i, 0);
+    }
+
+    // Apply the reflector
+    A = A.apply_householder_left(v_full, beta);
+    B = B.apply_householder_left(v_full, beta);
+    Q = Q.apply_householder_right(v_full, beta);
+
+    // Make B upper triangular in this column range
+    // For each row below the diagonal, eliminate the element
+    for (size_t i = col_idx + 1; i < n; i++) {
+      if (std::abs(B(i, col_idx)) > 1e-12) {
+        // Create a Givens rotation to eliminate B(i, col_idx)
+        T c, s;
+        T r = std::hypot(B(col_idx, col_idx), B(i, col_idx));
+        c = B(col_idx, col_idx) / r;
+        s = -B(i, col_idx) / r;
+
+        // Apply the Givens rotation to rows col_idx and i of B
+        for (size_t j = col_idx; j < n; j++) {
+          T temp = c * B(col_idx, j) - s * B(i, j);
+          B(i, j) = s * B(col_idx, j) + c * B(i, j);
+          B(col_idx, j) = temp;
+        }
+
+        // Apply the Givens rotation to rows col_idx and i of A
+        for (size_t j = 0; j < n; j++) {
+          T temp = c * A(col_idx, j) - s * A(i, j);
+          A(i, j) = s * A(col_idx, j) + c * A(i, j);
+          A(col_idx, j) = temp;
+        }
+
+        // Update Q to account for this transformation
+        for (size_t j = 0; j < n; j++) {
+          T temp = c * Q(j, col_idx) - s * Q(j, i);
+          Q(j, i) = s * Q(j, col_idx) + c * Q(j, i);
+          Q(j, col_idx) = temp;
+        }
+      }
+    }
+
+    return {A, B, Q, Z};
+  }
+
+  // Algorithm 6: Full Hessenberg-triangular reduction with preprocessing and iterative refinement
+
+  std::tuple<Matrix, Matrix, Matrix, Matrix> hessenberg_triangular_reduction(
+      const Matrix& A_in, const Matrix& B_in, T epsilon, T tol,
+      size_t max_iter) {
+    if (!A_in.is_square() || !B_in.is_square() || A_in.rows() != B_in.rows())
+      throw std::invalid_argument(
+          "Matrices A and B must be square and of the same size");
+
+    size_t n = A_in.rows();
+
+    // Create copies to work with
+    Matrix A = A_in.clone();
+    Matrix B = B_in.clone();
+
+    // Step 1: Initialize k
+    size_t k = 0;
+
+    // Step 2: Calculate the RRRQ decomposition of B
+    // For simplicity, we'll use QR decomposition of B^T, which gives B = P*R*Z
+    Matrix B_T = B.transpose();
+    auto [Q_B, R_B] = B_T.qr_decomposition();
+    Matrix P = Q_B;
+    Matrix Zc = R_B.transpose();
+
+    // Steps 3-4: Update A and B
+    A = P * A * Zc;
+    B = P * B * Zc;
+
+    // Steps 5-6: Initialize Q and Z
+    Matrix Q = P.transpose();
+    Matrix Z = Zc;
+
+    // Calculate norm of B for comparison
+    T B_norm = B.frobenius_norm();
+
+    // Steps 7-10: Handle small diagonal elements in B
+    while (k < n && std::abs(B(k, k)) < epsilon * B_norm) {
+      // Step 8: Reduce a single column using appropriate HT reduction
+      // This would typically use Algorithm 3 for the specific column
+      Matrix A_sub = A.sub_matrix(k, k, n - k, n - k);
+      Matrix B_sub = B.sub_matrix(k, k, n - k, n - k);
+
+      auto [A_reduced, B_reduced, Q_k, Z_k] =
+          householder_ht_reduction_single_column(A_sub, B_sub, k);
+
+      // Update the matrices
+      A.set_block(k, k, A_reduced);
+      B.set_block(k, k, B_reduced);
+
+      // Update Q and Z
+      Matrix Q_full = Matrix::identity(n);
+      Matrix Z_full = Matrix::identity(n);
+
+      Q_full.set_block(k, k, Q_k);
+      Z_full.set_block(k, k, Z_k);
+
+      Q = Q * Q_full;
+      Z = Z * Z_full;
+
+      // Step 9: Increment k
+      k++;
+    }
+
+    // Steps 11-24: Main iterative refinement loop
+    bool is_hessenberg = false;
+    size_t iter_count = 0;
+
+    while (!is_hessenberg && iter_count < max_iter) {
+      // Step 12: Compute X = Ak:n,k:n * inv(Bk:n,k:n)
+      Matrix A_sub = A.sub_matrix(k, k, n - k, n - k);
+      Matrix B_sub = B.sub_matrix(k, k, n - k, n - k);
+      Matrix X = A_sub * B_sub.inverse();
+
+      // Step 13: Calculate Qc so that Qc^T * X * Qc is Hessenberg
+      auto [H, Qc] = X.hessenberg_decomposition();
+
+      // Steps 14-16: Update A, B, and Q
+      // Apply Qc^T from the left to A and B, and Qc from the right to Q
+      Matrix A_left = A.sub_matrix(k, 0, n - k, n);
+      A_left = Qc.transpose() * A_left;
+      A.set_block(k, 0, A_left);
+
+      Matrix B_left = B.sub_matrix(k, 0, n - k, n);
+      B_left = Qc.transpose() * B_left;
+      B.set_block(k, 0, B_left);
+
+      Matrix Q_right = Q.sub_matrix(0, k, n, n - k);
+      Q_right = Q_right * Qc;
+      Q.set_block(0, k, Q_right);
+
+      // Step 17: Calculate Zc so that Bk:n,k:n * Zc is upper triangular
+      // For simplicity, we can use QR decomposition of B_sub^T
+      B_T = B_sub.transpose();
+      auto [Q_B_sub, R_B_sub] = B_T.qr_decomposition();
+      Matrix Zc_sub = Q_B_sub;
+
+      // Steps 18-20: Update A, B, and Z
+      Matrix A_right = A.sub_matrix(0, k, n, n - k);
+      A_right = A_right * Zc_sub;
+      A.set_block(0, k, A_right);
+
+      Matrix B_right = B.sub_matrix(0, k, n, n - k);
+      B_right = B_right * Zc_sub;
+      B.set_block(0, k, B_right);
+
+      Matrix Z_right = Z.sub_matrix(0, k, n, n - k);
+      Z_right = Z_right * Zc_sub;
+      Z.set_block(0, k, Z_right);
+
+      // Steps 21-23: Check for convergence and update k if necessary
+      bool subdiagonal_small = true;
+      for (size_t i = k + 2; i < n; i++) {
+        if (std::abs(A(i, k)) > tol) {
+          subdiagonal_small = false;
+          break;
+        }
+      }
+
+      if (subdiagonal_small) {
+        k++;
+      }
+
+      // Check if A is in Hessenberg form
+      // is_hessenberg = true;
+      // for (size_t i = 0; i < n; i++) {
+      //   for (size_t j = 0; j < i - 1; j++) {
+      //     if (std::abs(A(i, j)) > tol) {
+      //       is_hessenberg = false;
+      //       break;
+      //     }
+      //   }
+      //   if (!is_hessenberg)
+      //     break;
+      // }
+      is_hessenberg = true;
+      for (size_t i = 2; i < n; i++) {  // Start from i=2 since we need i-1 > 0
+        for (size_t j = 0; j < i - 1; j++) {
+          if (std::abs(A(i, j)) > tol) {
+            is_hessenberg = false;
+            break;
+          }
+        }
+        if (!is_hessenberg)
+          break;
+      }
+
+      iter_count++;
     }
 
     return {A, B, Q, Z};

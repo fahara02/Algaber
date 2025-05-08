@@ -1057,6 +1057,39 @@ TEST(MatrixTest, BalancedFormTwoPhase) {
     // appears to modify the determinant significantly
   }
 }
+
+TEST(MatrixTest, QRDecomposition) {
+  Matrix m({{1.0, 2.0}, {3.0, 4.0}});
+  auto [Q, R] = m.qr_decomposition();
+  // Reconstruct and compare
+  Matrix recon = Q * R;
+  assert_matrix_near(recon, m, 1e-8);
+  // Check Q orthonormal: Q^T * Q = I
+  Matrix I = Q.transpose() * Q;
+  Matrix eye = Matrix::identity(Q.rows());
+  assert_matrix_near(I, eye, 1e-8);
+}
+
+TEST(MatrixTest, HessenbergDecomposition) {
+  Matrix m({{4.0, 1.0, 2.0}, {3.0, 5.0, 6.0}, {7.0, 8.0, 9.0}});
+  auto [H, Q] = m.hessenberg_decomposition();
+  size_t n = m.rows();
+  // Check H(i,j)=0 for i > j+1
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j + 1 < i; ++j) {
+      EXPECT_NEAR(H(i, j), 0.0, tol)
+          << "H not Hessenberg at (" << i << "," << j << ")";
+    }
+  }
+  // Check orthonormal Q: Q^T * Q = I
+  Matrix I1 = Q.transpose() * Q;
+  Matrix I = Matrix::identity(n);
+  assert_matrix_near(I1, I, tol);
+  // Check reconstruction: Q * H * Q^T = m
+  Matrix recon = Q * H * Q.transpose();
+  assert_matrix_near(recon, m, 1e-8);
+}
+
 TEST(SolveTriangularTest, LowerNonUnitDiagonal) {
   Matrix L(2, 2, {2, 0, 3, 4});
   Matrix rhs(2, 1, {6, 11});
@@ -1217,4 +1250,43 @@ TEST(HouseholderHTReductionTest, IdentityMatrices) {
   assert_matrix_near(Q, Matrix::identity(n));
   assert_matrix_near(Z, Matrix::identity(n));
 }
+
+TEST(MatrixTest, HouseholderHTSingleColumn) {
+  Matrix A_sub = Matrix::identity(2);
+  Matrix B_sub({{3.0, 4.0}, {5.0, 6.0}});
+  auto [A, B, Q, Z] =
+      A_sub.householder_ht_reduction_single_column(A_sub, B_sub, 0);
+  // B first column below diagonal zero and diagonal equals hypot
+  double r = std::hypot(3.0, 5.0);
+  EXPECT_NEAR(B(0, 0), r, tol);
+  EXPECT_NEAR(B(1, 0), 0.0, tol);
+  // Q orthonormal and Z remains identity
+  assert_matrix_near(Q.transpose() * Q, Matrix::identity(2), tol);
+  assert_matrix_near(Z, Matrix::identity(2), tol);
+  // A equals Q^T applied to identity
+  assert_matrix_near(A, Q.transpose(), tol);
+}
+
+TEST(MatrixTest, HessenbergTriangularReductionIdentity) {
+  size_t n = 4;
+  Matrix A = Matrix::identity(n);
+  Matrix B = Matrix::identity(n);
+  auto [H, Tm, Qm, Zm] = A.hessenberg_triangular_reduction(A, B, 1e-6, 1e-6, 5);
+  // Check H is upper Hessenberg
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j + 1 < i; ++j) {
+      EXPECT_NEAR(H(i, j), 0.0, tol);
+    }
+  }
+  // Check T is upper triangular
+  for (size_t i = 1; i < n; ++i) {
+    for (size_t j = 0; j < i; ++j) {
+      EXPECT_NEAR(Tm(i, j), 0.0, tol);
+    }
+  }
+  // Q and Z should be orthonormal
+  assert_matrix_near(Qm.transpose() * Qm, Matrix::identity(n), tol);
+  assert_matrix_near(Zm.transpose() * Zm, Matrix::identity(n), tol);
+}
+
 // Main function is provided by gtest_main.o
