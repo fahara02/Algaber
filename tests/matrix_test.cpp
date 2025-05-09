@@ -1,3 +1,4 @@
+#pragma once
 #include "linear_algebra/matrix.hpp"
 #include <gtest/gtest.h>
 

@@ -23,6 +23,7 @@
 #include "custom_iterators.hpp"
 #include "library_config.hpp"
 #include "matrix_error.hpp"
+#include "matrix_errors_trial.hpp"
 
 // TODO: Core Linear Algebra Features
 // 1. Matrix Decompositions:
@@ -1163,12 +1164,12 @@ class Matrix {
   }
 
   // ===== Block-Based Scalar Division =====
-  Matrix operator/(const T& scalar) const {
+  Result<Matrix> operator/(const T& scalar) const {
     if (scalar == T{0})
-      throw std::invalid_argument("Division by zero");
+      return Result<Matrix>(ErrorCode::DIVIDE_BY_ZERO);
 
     const size_t block_size = BLOCK_SIZE;
-    Matrix result(view_rows_, view_cols_);
+    Matrix result = *this;
 
     if constexpr (ALGABER_OPENMP_ENABLED) {
 #pragma omp parallel for num_threads(ThreadCount) collapse(2)
@@ -1403,9 +1404,11 @@ class Matrix {
   }
 
   // Extract a single column from the matrix
-  Matrix getColumn(size_t colIndex) const {
-    if (colIndex >= view_cols_)
-      throw col_outbound();
+  Result<Matrix> getColumn(size_t colIndex) const {
+    // if (colIndex >= view_cols_)
+    //   throw col_outbound();
+    MATRIX_RESULT_ERROR_IF(colIndex >= view_cols_,
+                           ErrorCode::DIMENSION_MISMATCH);
 
     Matrix result(static_cast<size_t>(view_rows_), static_cast<size_t>(1));
     for (size_t i = 0; i < view_rows_; ++i) {
@@ -1523,9 +1526,9 @@ class Matrix {
     return *this;
   }
   // In-place scalar division
-  Matrix& operator/=(const T& scalar) {
+  Matrix operator/=(const T& scalar) {
     if (scalar == T{0})
-      throw std::invalid_argument("Division by zero");
+      return Result<Matrix>(ErrorCode::DIVIDE_BY_ZERO);
 
     for (size_t i = 0; i < view_rows_; ++i)
       for (size_t j = 0; j < view_cols_; ++j)
@@ -3423,8 +3426,8 @@ class Matrix {
       for (size_t k = 0; k < i; ++k) {
         sum += result.L(i, k) * result.L(i, k);
       }
-      T a_ii = operator()(i, i);
-      T diag_sq = a_ii - sum;
+      T diag_sq = operator()(i, i);
+      diag_sq -= sum;
       if (diag_sq <= T{0}) {
         throw std::runtime_error("Matrix is not positive definite");
       }
@@ -3744,7 +3747,7 @@ class Matrix {
     size_t block_size = BLOCK_SIZE;
     for (size_t col_outer = 0; col_outer < rhs.cols();
          col_outer += block_size) {
-      size_t col_end = std::min(col_outer + block_size, rhs.cols());
+      //size_t col_end = std::min(col_outer + block_size, rhs.cols());
       // For each column in rhs, solve the triangular system
       for (size_t col = 0; col < rhs.cols(); ++col) {
         // Copy the current column from rhs to X
@@ -3840,7 +3843,7 @@ class Matrix {
       throw std::invalid_argument("Matrix must be square");
 
     const size_t n = view_rows_;
-    Matrix<T> balanced(*this);
+    Matrix balanced(*this);
     const T radix = static_cast<T>(2);
     const T eps = std::numeric_limits<T>::epsilon();
     const T convergence_factor = static_cast<T>(0.95);
@@ -4140,6 +4143,7 @@ class Matrix {
 
       // Compute Householder vector
       Matrix<T> x = this->view(k + j + 1, col, n - (k + j + 1), 1);
+
       auto [u, tau] = x.house_v();
 
       // Store u in U_panel
